@@ -1,0 +1,15 @@
+{
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+  "C_Cpp.default.includePath": [
+    "${workspaceFolder}/include",
+    "${workspaceFolder}/protocol",
+    "${workspaceFolder}/network",
+    "${workspaceFolder}/build/_deps/googletest-src/googletest/include",
+    "${workspaceFolder}/build/_deps/googletest-src/googlemock/include",
+    "/opt/anaconda3/include"
+  ],
+  "C_Cpp.default.cppStandard": "c++20",
+  "clangd.arguments": [
+    "--compile-commands-dir=${workspaceFolder}/build"
+  ]
+}
