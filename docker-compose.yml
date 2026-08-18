@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  node-a:
+    build: .
+    container_name: shardcache-node-a
+    ports:
+      - "7001:7001"
+    environment:
+      - NODE_ID=nodeA
+      - PORT=7001
+
+  node-b:
+    build: .
+    container_name: shardcache-node-b
+    ports:
+      - "7002:7002"
+    environment:
+      - NODE_ID=nodeB
+      - PORT=7002
+
+  node-c:
+    build: .
+    container_name: shardcache-node-c
+    ports:
+      - "7003:7003"
+    environment:
+      - NODE_ID=nodeC
+      - PORT=7003
