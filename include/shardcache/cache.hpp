@@ -58,6 +58,9 @@ public:
 
     void clear();
 
+    bool expire(const std::string& key, std::chrono::seconds ttl);
+    std::optional<std::chrono::seconds> ttl(const std::string& key) const;
+
     const CacheMetrics& metrics() const { return metrics_; }
 
     void purge_expired();

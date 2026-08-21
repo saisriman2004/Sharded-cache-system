@@ -25,6 +25,16 @@ TEST(ProtocolTest, ParseCommands) {
     auto cmd_del = Parser::parse("DELETE name");
     EXPECT_EQ(cmd_del.type, CommandType::Delete);
     EXPECT_EQ(cmd_del.key, "name");
+
+    auto cmd_exp = Parser::parse("EXPIRE name 120");
+    EXPECT_EQ(cmd_exp.type, CommandType::Expire);
+    EXPECT_EQ(cmd_exp.key, "name");
+    ASSERT_TRUE(cmd_exp.ttl_seconds.has_value());
+    EXPECT_EQ(cmd_exp.ttl_seconds.value(), 120);
+
+    auto cmd_ttl = Parser::parse("TTL name");
+    EXPECT_EQ(cmd_ttl.type, CommandType::Ttl);
+    EXPECT_EQ(cmd_ttl.key, "name");
 }
 
 TEST(ProtocolTest, GenerateResponses) {

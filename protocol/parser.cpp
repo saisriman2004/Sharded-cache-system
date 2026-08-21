@@ -59,6 +59,9 @@ Command Parser::parse(const std::string& line) {
         } catch (...) {
             cmd.type = CommandType::Unknown;
         }
+    } else if (verb == "TTL" && tokens.size() >= 2) {
+        cmd.type = CommandType::Ttl;
+        cmd.key = tokens[1];
     } else {
         cmd.type = CommandType::Unknown;
     }

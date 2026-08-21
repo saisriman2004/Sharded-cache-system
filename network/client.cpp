@@ -69,6 +69,22 @@ bool Client::remove(const std::string& key) {
     return send_raw("DELETE " + key) == "OK";
 }
 
+bool Client::expire(const std::string& key, uint64_t ttl_seconds) {
+    return send_raw("EXPIRE " + key + " " + std::to_string(ttl_seconds)) == "OK";
+}
+
+std::optional<int64_t> Client::ttl(const std::string& key) {
+    std::string resp = send_raw("TTL " + key);
+    if (resp.rfind("INT ", 0) == 0) {
+        try {
+            return std::stoll(resp.substr(4));
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+    return std::nullopt;
+}
+
 bool Client::ping() {
     return send_raw("PING") == "PONG";
 }

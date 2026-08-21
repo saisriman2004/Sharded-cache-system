@@ -19,6 +19,8 @@ public:
     bool set(const std::string& key, const std::string& value, std::optional<uint64_t> ttl = std::nullopt);
     std::optional<std::string> get(const std::string& key);
     bool remove(const std::string& key);
+    bool expire(const std::string& key, uint64_t ttl_seconds);
+    std::optional<int64_t> ttl(const std::string& key);
     bool ping();
 
 private:

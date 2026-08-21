@@ -17,7 +17,7 @@ void ClientSession::do_read() {
         socket_,
         buffer_,
         "\r\n",
-        [this, self](boost::system::error_code ec, std::size_t bytes_transferred) {
+        [this, self](boost::system::error_code ec, std::size_t /*bytes_transferred*/) {
             if (!ec) {
                 std::string line;
                 std::istream is(&buffer_);
@@ -27,14 +27,16 @@ void ClientSession::do_read() {
                 }
 
                 process_command_line(line);
-                do_read();
             }
         }
     );
 }
 
 void ClientSession::process_command_line(const std::string& line) {
-    if (line.empty()) return;
+    if (line.empty()) {
+        do_read();
+        return;
+    }
 
     using namespace protocol;
     Command cmd = Parser::parse(line);
@@ -67,6 +69,24 @@ void ClientSession::process_command_line(const std::string& line) {
             resp = Response::integer(exists ? 1 : 0);
             break;
         }
+        case CommandType::Expire: {
+            if (!cmd.ttl_seconds.has_value()) {
+                resp = Response::error("EXPIRE requires key and TTL seconds");
+            } else {
+                bool ok = cache_.expire(cmd.key, std::chrono::seconds(cmd.ttl_seconds.value()));
+                resp = ok ? Response::ok() : Response::not_found();
+            }
+            break;
+        }
+        case CommandType::Ttl: {
+            auto remaining = cache_.ttl(cmd.key);
+            if (remaining.has_value()) {
+                resp = Response::integer(remaining.value().count());
+            } else {
+                resp = Response::integer(-1);
+            }
+            break;
+        }
         case CommandType::Stats: {
             std::string stats_body = "entries:" + std::to_string(cache_.size()) + "\r\n" +
                                      "capacity:" + std::to_string(cache_.capacity()) + "\r\n" +
@@ -81,16 +101,18 @@ void ClientSession::process_command_line(const std::string& line) {
             break;
     }
 
-    do_write(resp);
+    do_write(std::make_shared<std::string>(std::move(resp)));
 }
 
-void ClientSession::do_write(const std::string& response) {
+void ClientSession::do_write(std::shared_ptr<std::string> response) {
     auto self(shared_from_this());
     boost::asio::async_write(
         socket_,
-        boost::asio::buffer(response),
-        [this, self](boost::system::error_code ec, std::size_t /*bytes_transferred*/) {
-            if (ec) {
+        boost::asio::buffer(*response),
+        [this, self, response](boost::system::error_code ec, std::size_t /*bytes_transferred*/) {
+            if (!ec) {
+                do_read();
+            } else {
                 Logger::instance().error("TCP write error: " + ec.message());
             }
         }

@@ -22,7 +22,7 @@ public:
 private:
     void do_read();
     void process_command_line(const std::string& line);
-    void do_write(const std::string& response);
+    void do_write(std::shared_ptr<std::string> response);
 
     boost::asio::ip::tcp::socket socket_;
     ShardedCache& cache_;

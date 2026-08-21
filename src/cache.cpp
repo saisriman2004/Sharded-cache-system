@@ -120,6 +120,40 @@ void Cache::clear() {
     lru_list_.clear();
 }
 
+bool Cache::expire(const std::string& key, std::chrono::seconds ttl) {
+    std::unique_lock lock(mutex_);
+    auto it = entries_.find(key);
+    if (it == entries_.end()) {
+        return false;
+    }
+    auto now = std::chrono::steady_clock::now();
+    if (it->second->entry.is_expired(now)) {
+        lru_list_.erase(it->second);
+        entries_.erase(it);
+        metrics_.expirations.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    it->second->entry.expires_at = now + ttl;
+    return true;
+}
+
+std::optional<std::chrono::seconds> Cache::ttl(const std::string& key) const {
+    std::shared_lock lock(mutex_);
+    auto it = entries_.find(key);
+    if (it == entries_.end()) {
+        return std::nullopt;
+    }
+    auto now = std::chrono::steady_clock::now();
+    if (it->second->entry.is_expired(now)) {
+        return std::nullopt;
+    }
+    if (!it->second->entry.expires_at.has_value()) {
+        return std::nullopt;
+    }
+    auto diff = std::chrono::duration_cast<std::chrono::seconds>(it->second->entry.expires_at.value() - now);
+    return diff.count() >= 0 ? diff : std::chrono::seconds(0);
+}
+
 void Cache::purge_expired() {
     std::unique_lock lock(mutex_);
     auto now = std::chrono::steady_clock::now();
