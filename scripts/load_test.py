@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 import socket
 import time
+import sys
 import concurrent.futures
 
 HOST = '127.0.0.1'
-PORT = 7001
-CONCURRENT_CLIENTS = 10
-OPS_PER_CLIENT = 100
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9090
+CONCURRENT_CLIENTS = int(sys.argv[2]) if len(sys.argv) > 2 else 16
+OPS_PER_CLIENT = int(sys.argv[3]) if len(sys.argv) > 3 else 1000
 
 def send_command(sock, cmd):
     sock.sendall((cmd + '\r\n').encode('utf-8'))
@@ -30,7 +31,7 @@ def run_client(client_id):
     return hits
 
 def main():
-    print(f"Starting load test on {HOST}:{PORT} with {CONCURRENT_CLIENTS} concurrent clients...")
+    print(f"Starting load test on {HOST}:{PORT} with {CONCURRENT_CLIENTS} concurrent clients ({OPS_PER_CLIENT * 2} ops/client)...")
     start_time = time.time()
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENT_CLIENTS) as executor:
