@@ -8,6 +8,8 @@
 #include <condition_variable>
 #include <memory>
 
+#include <exception>
+
 namespace shardcache {
 
 class SingleFlight {
@@ -25,7 +27,7 @@ private:
         std::condition_variable cv;
         bool done{false};
         std::string val;
-        std::string err;
+        std::exception_ptr exc{nullptr};
     };
 
     std::mutex map_mutex_;

@@ -21,19 +21,24 @@ std::string SingleFlight::do_call(const std::string& key, FetchFn fn) {
     if (!is_leader) {
         std::unique_lock call_lock(call->mutex);
         call->cv.wait(call_lock, [&call]() { return call->done; });
+        if (call->exc) {
+            std::rethrow_exception(call->exc);
+        }
         return call->val;
     }
 
     std::string result;
+    std::exception_ptr exc = nullptr;
     try {
         result = fn();
-    } catch (const std::exception& e) {
-        call->err = e.what();
+    } catch (...) {
+        exc = std::current_exception();
     }
 
     {
         std::unique_lock call_lock(call->mutex);
         call->val = result;
+        call->exc = exc;
         call->done = true;
     }
     call->cv.notify_all();
@@ -41,6 +46,10 @@ std::string SingleFlight::do_call(const std::string& key, FetchFn fn) {
     {
         std::unique_lock lock(map_mutex_);
         calls_.erase(key);
+    }
+
+    if (exc) {
+        std::rethrow_exception(exc);
     }
 
     return result;

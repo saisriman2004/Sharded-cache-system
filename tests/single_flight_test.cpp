@@ -33,3 +33,12 @@ TEST(SingleFlightTest, CoalesceDuplicateRequests) {
         EXPECT_EQ(results[i], "fetched_data");
     }
 }
+
+TEST(SingleFlightTest, ExceptionPropagation) {
+    shardcache::SingleFlight sf;
+    auto throwing_fetch = []() -> std::string {
+        throw std::runtime_error("DB connection failure");
+    };
+
+    EXPECT_THROW(sf.do_call("failed_key", throwing_fetch), std::runtime_error);
+}

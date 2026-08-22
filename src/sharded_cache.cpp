@@ -3,7 +3,11 @@
 
 namespace shardcache {
 
-ShardedCache::ShardedCache(std::size_t total_capacity, std::size_t shard_count) {
+ShardedCache::ShardedCache(
+    std::size_t total_capacity,
+    std::size_t shard_count,
+    std::optional<std::chrono::milliseconds> active_ttl_interval
+) {
     if (shard_count == 0) shard_count = 1;
     std::size_t capacity_per_shard = total_capacity / shard_count;
     if (capacity_per_shard == 0) capacity_per_shard = 1;
@@ -11,6 +15,19 @@ ShardedCache::ShardedCache(std::size_t total_capacity, std::size_t shard_count) 
     shards_.reserve(shard_count);
     for (std::size_t i = 0; i < shard_count; ++i) {
         shards_.push_back(std::make_unique<Cache>(capacity_per_shard));
+    }
+
+    if (active_ttl_interval.has_value()) {
+        ttl_manager_ = std::make_unique<TTLManager>([this]() {
+            this->purge_expired();
+        }, active_ttl_interval.value());
+        ttl_manager_->start();
+    }
+}
+
+ShardedCache::~ShardedCache() {
+    if (ttl_manager_) {
+        ttl_manager_->stop();
     }
 }
 
@@ -40,6 +57,43 @@ bool ShardedCache::remove(const std::string& key) {
 bool ShardedCache::contains(const std::string& key) {
     std::size_t idx = get_shard_index(key);
     return shards_[idx]->contains(key);
+}
+
+bool ShardedCache::expire(const std::string& key, std::chrono::seconds ttl) {
+    std::size_t idx = get_shard_index(key);
+    return shards_[idx]->expire(key, ttl);
+}
+
+std::optional<std::chrono::seconds> ShardedCache::ttl(const std::string& key) {
+    std::size_t idx = get_shard_index(key);
+    return shards_[idx]->ttl(key);
+}
+
+std::string ShardedCache::get_or_load(
+    const std::string& key,
+    std::function<std::string()> loader,
+    std::optional<std::chrono::seconds> ttl
+) {
+    auto val = get(key);
+    if (val.has_value()) {
+        return val.value();
+    }
+
+    return single_flight_.do_call(key, [this, &key, &loader, &ttl]() {
+        auto cached = get(key);
+        if (cached.has_value()) {
+            return cached.value();
+        }
+        std::string loaded = loader();
+        set(key, loaded, ttl);
+        return loaded;
+    });
+}
+
+void ShardedCache::purge_expired() {
+    for (auto& shard : shards_) {
+        shard->purge_expired();
+    }
 }
 
 std::size_t ShardedCache::size() const {
