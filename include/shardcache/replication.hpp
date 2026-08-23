@@ -17,6 +17,10 @@ enum class ReplicationMode {
 class ReplicationManager {
 public:
     explicit ReplicationManager(ReplicationMode mode = ReplicationMode::Sync);
+    explicit ReplicationManager(
+        const std::string& local_node_id,
+        ReplicationMode mode = ReplicationMode::Sync
+    );
     ~ReplicationManager() = default;
 
     bool replicate_set(
@@ -34,6 +38,7 @@ public:
     ReplicationMode mode() const { return mode_; }
 
 private:
+    std::string local_node_id_;
     ReplicationMode mode_;
 };
 

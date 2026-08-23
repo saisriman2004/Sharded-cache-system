@@ -9,6 +9,8 @@
 #include <vector>
 #include <mutex>
 
+#include <unordered_map>
+
 namespace shardcache {
 
 class HealthChecker {
@@ -33,6 +35,7 @@ private:
     std::thread worker_;
     std::mutex nodes_mutex_;
     std::vector<CacheNode> nodes_;
+    std::unordered_map<std::string, int> failure_counts_;
 };
 
 } // namespace shardcache
