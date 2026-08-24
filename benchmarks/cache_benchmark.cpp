@@ -8,12 +8,30 @@
 #include <algorithm>
 #include <numeric>
 #include <iomanip>
+#include <string>
 
 using namespace shardcache;
 
-void run_benchmark(const std::string& name, std::size_t num_threads, std::size_t ops_per_thread, bool use_sharded) {
+void run_benchmark_workload(
+    const std::string& name,
+    std::size_t num_threads,
+    std::size_t ops_per_thread,
+    int set_percentage,
+    bool use_sharded
+) {
     Cache single_cache(100000);
     ShardedCache sharded_cache(100000, 16);
+
+    // Pre-populate data to simulate realistic cache hit rates
+    for (int i = 0; i < 10000; ++i) {
+        std::string k = "key_" + std::to_string(i);
+        std::string v = "val_" + std::to_string(i);
+        if (use_sharded) {
+            sharded_cache.set(k, v);
+        } else {
+            single_cache.set(k, v);
+        }
+    }
 
     std::vector<std::thread> threads;
     threads.reserve(num_threads);
@@ -32,16 +50,18 @@ void run_benchmark(const std::string& name, std::size_t num_threads, std::size_t
                 std::string k = "key_" + std::to_string((t * ops_per_thread + i) % 10000);
                 std::string v = "val_" + std::to_string(i);
 
+                bool is_set = ((i % 100) < static_cast<std::size_t>(set_percentage));
+
                 auto t0 = std::chrono::high_resolution_clock::now();
 
                 if (use_sharded) {
-                    if (i % 3 == 0) {
+                    if (is_set) {
                         sharded_cache.set(k, v);
                     } else {
                         (void)sharded_cache.get(k);
                     }
                 } else {
-                    if (i % 3 == 0) {
+                    if (is_set) {
                         single_cache.set(k, v);
                     } else {
                         (void)single_cache.get(k);
@@ -70,9 +90,9 @@ void run_benchmark(const std::string& name, std::size_t num_threads, std::size_t
     std::size_t total_ops = num_threads * ops_per_thread;
     double ops_per_sec = total_ops / total_sec;
 
-    double p50 = latencies[total_ops * 0.50];
-    double p95 = latencies[total_ops * 0.95];
-    double p99 = latencies[total_ops * 0.99];
+    double p50 = latencies[static_cast<std::size_t>(total_ops * 0.50)];
+    double p95 = latencies[static_cast<std::size_t>(total_ops * 0.95)];
+    double p99 = latencies[static_cast<std::size_t>(total_ops * 0.99)];
 
     std::cout << "| " << std::setw(25) << std::left << name
               << " | " << std::setw(8) << num_threads
@@ -85,14 +105,21 @@ void run_benchmark(const std::string& name, std::size_t num_threads, std::size_t
 
 int main() {
     std::cout << "=========================================================================================" << std::endl;
-    std::cout << "                                 SHARDCACHE PERFORMANCE BENCHMARK                        " << std::endl;
+    std::cout << "                         SHARDCACHE WORKLOAD BENCHMARK SUITE                             " << std::endl;
     std::cout << "=========================================================================================" << std::endl;
     std::cout << "| Target Implementation     | Threads  | Ops/sec      | p50      | p95      | p99      |" << std::endl;
     std::cout << "|---------------------------|----------|--------------|----------|----------|----------|" << std::endl;
 
+    std::cout << "--- Typical Cache Workload (80% GET / 20% SET) ---" << std::endl;
     for (std::size_t threads : {1, 4, 8, 16}) {
-        run_benchmark("Single Lock Cache", threads, 50000, false);
-        run_benchmark("16-Shard Cache", threads, 50000, true);
+        run_benchmark_workload("Single Lock Cache", threads, 30000, 20, false);
+        run_benchmark_workload("16-Shard Cache", threads, 30000, 20, true);
+    }
+
+    std::cout << "--- Read-Heavy Workload (95% GET / 5% SET) ---" << std::endl;
+    for (std::size_t threads : {4, 16}) {
+        run_benchmark_workload("Single Lock Cache", threads, 30000, 5, false);
+        run_benchmark_workload("16-Shard Cache", threads, 30000, 5, true);
     }
 
     std::cout << "=========================================================================================" << std::endl;

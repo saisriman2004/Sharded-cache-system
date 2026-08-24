@@ -9,6 +9,7 @@ services:
     environment:
       - NODE_ID=nodeA
       - PORT=7001
+      - CLUSTER_PEERS=nodeA:node-a:7001,nodeB:node-b:7002,nodeC:node-c:7003
 
   node-b:
     build: .
@@ -18,6 +19,7 @@ services:
     environment:
       - NODE_ID=nodeB
       - PORT=7002
+      - CLUSTER_PEERS=nodeA:node-a:7001,nodeB:node-b:7002,nodeC:node-c:7003
 
   node-c:
     build: .
@@ -27,3 +29,4 @@ services:
     environment:
       - NODE_ID=nodeC
       - PORT=7003
+      - CLUSTER_PEERS=nodeA:node-a:7001,nodeB:node-b:7002,nodeC:node-c:7003

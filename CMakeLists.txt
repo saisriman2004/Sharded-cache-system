@@ -37,6 +37,7 @@ add_library(shardcache_lib
 )
 
 target_include_directories(shardcache_lib PUBLIC 
+  ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}/protocol
   ${CMAKE_CURRENT_SOURCE_DIR}/network
