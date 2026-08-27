@@ -16,6 +16,12 @@ enum class CommandType {
     Ttl,
     Stats,
     Ping,
+    // Internal replication commands — these write directly to the
+    // receiving node's local cache and must never be routed through
+    // the cluster hash ring again.
+    ReplSet,
+    ReplDelete,
+    ReplExpire,
     Unknown
 };
 

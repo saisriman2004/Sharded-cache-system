@@ -62,6 +62,29 @@ Command Parser::parse(const std::string& line) {
     } else if (verb == "TTL" && tokens.size() >= 2) {
         cmd.type = CommandType::Ttl;
         cmd.key = tokens[1];
+    } else if (verb == "REPL_SET" && tokens.size() >= 3) {
+        cmd.type = CommandType::ReplSet;
+        cmd.key = tokens[1];
+        cmd.value = tokens[2];
+
+        if (tokens.size() >= 5 && to_upper(tokens[3]) == "TTL") {
+            try {
+                cmd.ttl_seconds = std::stoull(tokens[4]);
+            } catch (...) {
+                cmd.type = CommandType::Unknown;
+            }
+        }
+    } else if (verb == "REPL_DELETE" && tokens.size() >= 2) {
+        cmd.type = CommandType::ReplDelete;
+        cmd.key = tokens[1];
+    } else if (verb == "REPL_EXPIRE" && tokens.size() >= 3) {
+        cmd.type = CommandType::ReplExpire;
+        cmd.key = tokens[1];
+        try {
+            cmd.ttl_seconds = std::stoull(tokens[2]);
+        } catch (...) {
+            cmd.type = CommandType::Unknown;
+        }
     } else {
         cmd.type = CommandType::Unknown;
     }

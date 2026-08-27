@@ -45,3 +45,42 @@ TEST(ProtocolTest, GenerateResponses) {
     EXPECT_EQ(Response::not_found(), "NOT_FOUND\r\n");
     EXPECT_EQ(Response::pong(), "PONG\r\n");
 }
+
+TEST(ProtocolTest, ParseInternalReplicationCommands) {
+    using namespace shardcache::protocol;
+
+    // REPL_SET with value and TTL
+    auto cmd_rset = Parser::parse("REPL_SET session:abc userdata TTL 120");
+    EXPECT_EQ(cmd_rset.type, CommandType::ReplSet);
+    EXPECT_EQ(cmd_rset.key, "session:abc");
+    EXPECT_EQ(cmd_rset.value, "userdata");
+    ASSERT_TRUE(cmd_rset.ttl_seconds.has_value());
+    EXPECT_EQ(cmd_rset.ttl_seconds.value(), 120);
+
+    // REPL_SET without TTL
+    auto cmd_rset_nottl = Parser::parse("REPL_SET mykey myval");
+    EXPECT_EQ(cmd_rset_nottl.type, CommandType::ReplSet);
+    EXPECT_EQ(cmd_rset_nottl.key, "mykey");
+    EXPECT_EQ(cmd_rset_nottl.value, "myval");
+    EXPECT_FALSE(cmd_rset_nottl.ttl_seconds.has_value());
+
+    // REPL_DELETE
+    auto cmd_rdel = Parser::parse("REPL_DELETE session:abc");
+    EXPECT_EQ(cmd_rdel.type, CommandType::ReplDelete);
+    EXPECT_EQ(cmd_rdel.key, "session:abc");
+
+    // REPL_EXPIRE
+    auto cmd_rexp = Parser::parse("REPL_EXPIRE session:abc 300");
+    EXPECT_EQ(cmd_rexp.type, CommandType::ReplExpire);
+    EXPECT_EQ(cmd_rexp.key, "session:abc");
+    ASSERT_TRUE(cmd_rexp.ttl_seconds.has_value());
+    EXPECT_EQ(cmd_rexp.ttl_seconds.value(), 300);
+
+    // Malformed REPL_EXPIRE with non-numeric TTL
+    auto cmd_bad = Parser::parse("REPL_EXPIRE key notanumber");
+    EXPECT_EQ(cmd_bad.type, CommandType::Unknown);
+
+    // REPL_SET must not parse as regular SET
+    EXPECT_NE(cmd_rset.type, CommandType::Set);
+    EXPECT_NE(cmd_rdel.type, CommandType::Delete);
+}
