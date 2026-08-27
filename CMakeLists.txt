@@ -7,17 +7,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Compiler warnings
+add_compile_options(-Wall -Wextra -Wpedantic)
+
 find_package(Boost REQUIRED)
-
-enable_testing()
-
-include(FetchContent)
-FetchContent_Declare(
-  googletest
-  URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
-)
-set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(googletest)
+find_package(Threads REQUIRED)
 
 add_library(shardcache_lib
   src/cache.cpp
@@ -44,39 +38,55 @@ target_include_directories(shardcache_lib PUBLIC
   ${Boost_INCLUDE_DIRS}
 )
 
+target_link_libraries(shardcache_lib PUBLIC Threads::Threads)
+
 add_executable(shardcache_app
   src/main.cpp
 )
 target_link_libraries(shardcache_app PRIVATE shardcache_lib)
 
-add_executable(cache_test
-  tests/cache_test.cpp
-  tests/lru_test.cpp
-  tests/ttl_test.cpp
-  tests/consistent_hash_test.cpp
-  tests/cluster_test.cpp
-  tests/replication_test.cpp
-  tests/health_test.cpp
-  tests/single_flight_test.cpp
-  tests/sharded_cache_test.cpp
-  tests/protocol_test.cpp
-  tests/network_test.cpp
-)
+option(BUILD_TESTING "Build unit tests and benchmarks" ON)
 
-target_include_directories(cache_test PRIVATE
-  ${googletest_SOURCE_DIR}/googletest/include
-  ${googletest_SOURCE_DIR}/googlemock/include
-  ${CMAKE_CURRENT_SOURCE_DIR}/include
-  ${CMAKE_CURRENT_SOURCE_DIR}/protocol
-  ${CMAKE_CURRENT_SOURCE_DIR}/network
-)
+if(BUILD_TESTING)
+  enable_testing()
 
-target_link_libraries(cache_test PRIVATE shardcache_lib gtest_main)
+  include(FetchContent)
+  FetchContent_Declare(
+    googletest
+    URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
+  )
+  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(googletest)
 
-add_executable(cache_benchmark
-  benchmarks/cache_benchmark.cpp
-)
-target_link_libraries(cache_benchmark PRIVATE shardcache_lib)
+  add_executable(cache_test
+    tests/cache_test.cpp
+    tests/lru_test.cpp
+    tests/ttl_test.cpp
+    tests/consistent_hash_test.cpp
+    tests/cluster_test.cpp
+    tests/replication_test.cpp
+    tests/health_test.cpp
+    tests/single_flight_test.cpp
+    tests/sharded_cache_test.cpp
+    tests/protocol_test.cpp
+    tests/network_test.cpp
+  )
 
-include(GoogleTest)
-gtest_discover_tests(cache_test)
+  target_include_directories(cache_test PRIVATE
+    ${googletest_SOURCE_DIR}/googletest/include
+    ${googletest_SOURCE_DIR}/googlemock/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/protocol
+    ${CMAKE_CURRENT_SOURCE_DIR}/network
+  )
+
+  target_link_libraries(cache_test PRIVATE shardcache_lib gtest_main)
+
+  add_executable(cache_benchmark
+    benchmarks/cache_benchmark.cpp
+  )
+  target_link_libraries(cache_benchmark PRIVATE shardcache_lib)
+
+  include(GoogleTest)
+  gtest_discover_tests(cache_test)
+endif()
