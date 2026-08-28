@@ -4,8 +4,8 @@
 
 namespace shardcache::network {
 
-ClientSession::ClientSession(boost::asio::ip::tcp::socket socket, ShardedCache& cache)
-    : socket_(std::move(socket)), cache_(cache) {}
+ClientSession::ClientSession(boost::asio::ip::tcp::socket socket, Cluster& cluster)
+    : socket_(std::move(socket)), cluster_(cluster) {}
 
 void ClientSession::start() {
     do_read();
@@ -46,12 +46,14 @@ void ClientSession::process_command_line(const std::string& line) {
         case CommandType::Ping:
             resp = Response::pong();
             break;
+
+        // --- External commands routed through Cluster ---
         case CommandType::Set:
-            cache_.set(cmd.key, cmd.value, cmd.ttl_seconds.has_value() ? std::optional<std::chrono::seconds>(std::chrono::seconds(cmd.ttl_seconds.value())) : std::nullopt);
+            cluster_.set(cmd.key, cmd.value, cmd.ttl_seconds.has_value() ? std::optional<std::chrono::seconds>(std::chrono::seconds(cmd.ttl_seconds.value())) : std::nullopt);
             resp = Response::ok();
             break;
         case CommandType::Get: {
-            auto val = cache_.get(cmd.key);
+            auto val = cluster_.get(cmd.key);
             if (val.has_value()) {
                 resp = Response::value(val.value());
             } else {
@@ -60,12 +62,12 @@ void ClientSession::process_command_line(const std::string& line) {
             break;
         }
         case CommandType::Delete: {
-            bool removed = cache_.remove(cmd.key);
+            bool removed = cluster_.remove(cmd.key);
             resp = removed ? Response::ok() : Response::not_found();
             break;
         }
         case CommandType::Exists: {
-            bool exists = cache_.contains(cmd.key);
+            bool exists = cluster_.local_cache().contains(cmd.key);
             resp = Response::integer(exists ? 1 : 0);
             break;
         }
@@ -73,13 +75,13 @@ void ClientSession::process_command_line(const std::string& line) {
             if (!cmd.ttl_seconds.has_value()) {
                 resp = Response::error("EXPIRE requires key and TTL seconds");
             } else {
-                bool ok = cache_.expire(cmd.key, std::chrono::seconds(cmd.ttl_seconds.value()));
+                bool ok = cluster_.expire(cmd.key, std::chrono::seconds(cmd.ttl_seconds.value()));
                 resp = ok ? Response::ok() : Response::not_found();
             }
             break;
         }
         case CommandType::Ttl: {
-            auto remaining = cache_.ttl(cmd.key);
+            auto remaining = cluster_.ttl(cmd.key);
             if (remaining.has_value()) {
                 resp = Response::integer(remaining.value().count());
             } else {
@@ -88,14 +90,39 @@ void ClientSession::process_command_line(const std::string& line) {
             break;
         }
         case CommandType::Stats: {
-            std::string stats_body = "entries:" + std::to_string(cache_.size()) + "\r\n" +
-                                     "capacity:" + std::to_string(cache_.capacity()) + "\r\n" +
-                                     "hits:" + std::to_string(cache_.total_hits()) + "\r\n" +
-                                     "misses:" + std::to_string(cache_.total_misses()) + "\r\n" +
-                                     "hit_rate:" + std::to_string(cache_.overall_hit_rate()) + "%\r\n";
+            auto& cache = cluster_.local_cache();
+            std::string stats_body = "entries:" + std::to_string(cache.size()) + "\r\n" +
+                                     "capacity:" + std::to_string(cache.capacity()) + "\r\n" +
+                                     "hits:" + std::to_string(cache.total_hits()) + "\r\n" +
+                                     "misses:" + std::to_string(cache.total_misses()) + "\r\n" +
+                                     "hit_rate:" + std::to_string(cache.overall_hit_rate()) + "%\r\n";
             resp = Response::stats(stats_body);
             break;
         }
+
+        // --- Internal replication commands: write DIRECTLY to local cache ---
+        // These must never be routed through Cluster again.
+        case CommandType::ReplSet: {
+            auto ttl_opt = cmd.ttl_seconds.has_value()
+                ? std::optional<std::chrono::seconds>(std::chrono::seconds(cmd.ttl_seconds.value()))
+                : std::nullopt;
+            cluster_.local_cache().set(cmd.key, cmd.value, ttl_opt);
+            resp = Response::ok();
+            break;
+        }
+        case CommandType::ReplDelete: {
+            cluster_.local_cache().remove(cmd.key);
+            resp = Response::ok();
+            break;
+        }
+        case CommandType::ReplExpire: {
+            if (cmd.ttl_seconds.has_value()) {
+                cluster_.local_cache().expire(cmd.key, std::chrono::seconds(cmd.ttl_seconds.value()));
+            }
+            resp = Response::ok();
+            break;
+        }
+
         default:
             resp = Response::error("Unknown command");
             break;

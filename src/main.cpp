@@ -56,7 +56,7 @@ int main(int argc, char* argv[]) {
 
     try {
         boost::asio::io_context io_context;
-        shardcache::network::TCPServer server(io_context, port, cluster.local_cache());
+        shardcache::network::TCPServer server(io_context, port, cluster);
 
         shardcache::Logger::instance().info("ShardCache Engine running. Listening on port " + std::to_string(port) + "...");
         io_context.run();

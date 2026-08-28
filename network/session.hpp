@@ -1,7 +1,7 @@
 #ifndef SHARDCACHE_SESSION_HPP
 #define SHARDCACHE_SESSION_HPP
 
-#include "shardcache/sharded_cache.hpp"
+#include "shardcache/cluster.hpp"
 #include "parser.hpp"
 #include "response.hpp"
 
@@ -14,7 +14,7 @@ namespace shardcache::network {
 
 class ClientSession : public std::enable_shared_from_this<ClientSession> {
 public:
-    explicit ClientSession(boost::asio::ip::tcp::socket socket, ShardedCache& cache);
+    explicit ClientSession(boost::asio::ip::tcp::socket socket, Cluster& cluster);
     ~ClientSession() = default;
 
     void start();
@@ -25,7 +25,7 @@ private:
     void do_write(std::shared_ptr<std::string> response);
 
     boost::asio::ip::tcp::socket socket_;
-    ShardedCache& cache_;
+    Cluster& cluster_;
     boost::asio::streambuf buffer_;
 };
 

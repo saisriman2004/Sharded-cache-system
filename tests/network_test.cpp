@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "shardcache/sharded_cache.hpp"
+#include "shardcache/cluster.hpp"
 #include "tcp_server.hpp"
 #include "client.hpp"
 
@@ -7,11 +7,11 @@
 #include <chrono>
 
 TEST(NetworkTest, ServerClientInteraction) {
-    shardcache::ShardedCache cache(1000, 4);
+    shardcache::Cluster cluster("test_node", 2, 1000);
     boost::asio::io_context io_context;
 
     constexpr uint16_t test_port = 7099;
-    auto server = std::make_unique<shardcache::network::TCPServer>(io_context, test_port, cache);
+    auto server = std::make_unique<shardcache::network::TCPServer>(io_context, test_port, cluster);
 
     std::thread io_thread([&io_context]() {
         io_context.run();
