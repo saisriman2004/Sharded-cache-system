@@ -10,6 +10,7 @@
 int main(int argc, char* argv[]) {
     std::string node_id = "nodeA";
     uint16_t port = 7001;
+    std::string advertise_host = "127.0.0.1";
     std::string peers_str = "";
 
     if (const char* env_node = std::getenv("NODE_ID")) {
@@ -17,6 +18,9 @@ int main(int argc, char* argv[]) {
     }
     if (const char* env_port = std::getenv("PORT")) {
         port = static_cast<uint16_t>(std::atoi(env_port));
+    }
+    if (const char* env_host = std::getenv("ADVERTISE_HOST")) {
+        advertise_host = env_host;
     }
     if (const char* env_peers = std::getenv("CLUSTER_PEERS")) {
         peers_str = env_peers;
@@ -32,9 +36,10 @@ int main(int argc, char* argv[]) {
         peers_str = argv[3];
     }
 
-    shardcache::Logger::instance().info("Starting ShardCache Distributed Engine [Node: " + node_id + ", Port: " + std::to_string(port) + "]...");
+    shardcache::Logger::instance().info("Starting ShardCache Distributed Engine [Node: " + node_id + ", Port: " + std::to_string(port) + ", Advertise: " + advertise_host + "]...");
 
-    shardcache::Cluster cluster(node_id, 2, 100000);
+    shardcache::CacheNode local_node{node_id, advertise_host, port};
+    shardcache::Cluster cluster(local_node, 2, 100000);
 
     if (!peers_str.empty()) {
         std::istringstream iss(peers_str);

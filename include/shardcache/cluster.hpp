@@ -14,11 +14,24 @@ namespace shardcache {
 
 class Cluster {
 public:
+    /// Construct a cluster node with explicit identity.
+    /// @param local_node  The identity of this node (id, advertised host, advertised port).
+    /// @param replication_factor  Number of total copies (including primary).
+    /// @param cache_capacity  Maximum entries in the local cache.
+    explicit Cluster(
+        const CacheNode& local_node,
+        std::size_t replication_factor = 2,
+        std::size_t cache_capacity = 100000
+    );
+
+    /// Convenience constructor using just an ID (local address defaults to 127.0.0.1:7001).
+    /// Kept for backward compatibility with existing tests.
     explicit Cluster(
         const std::string& local_node_id,
         std::size_t replication_factor = 2,
         std::size_t cache_capacity = 100000
     );
+
     ~Cluster() = default;
 
     void add_node(const CacheNode& node);
@@ -46,8 +59,12 @@ public:
     std::size_t node_count() const { return ring_.node_count(); }
     ShardedCache& local_cache() { return local_cache_; }
 
+    const CacheNode& local_node() const { return local_node_; }
+
 private:
-    std::string local_node_id_;
+    void init_common();
+
+    CacheNode local_node_;
     std::size_t replication_factor_;
     ConsistentHashRing ring_;
     ShardedCache local_cache_;

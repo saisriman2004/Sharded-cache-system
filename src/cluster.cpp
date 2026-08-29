@@ -4,13 +4,8 @@
 
 namespace shardcache {
 
-Cluster::Cluster(const std::string& local_node_id, std::size_t replication_factor, std::size_t cache_capacity)
-    : local_node_id_(local_node_id),
-      replication_factor_(replication_factor),
-      ring_(100),
-      local_cache_(cache_capacity, 16),
-      replication_mgr_(local_node_id, ReplicationMode::Sync) {
-
+// Common initialization shared by both constructors.
+void Cluster::init_common() {
     health_checker_ = std::make_unique<HealthChecker>([this](const std::string& node_id, bool healthy) {
         if (!healthy) {
             Logger::instance().warning("Node " + node_id + " failed health check! Removing from hash ring.");
@@ -18,15 +13,32 @@ Cluster::Cluster(const std::string& local_node_id, std::size_t replication_facto
         }
     });
 
-    CacheNode local_node{local_node_id_, "127.0.0.1", 7001};
-    ring_.add_node(local_node);
-    nodes_[local_node_id_] = local_node;
+    ring_.add_node(local_node_);
+    nodes_[local_node_.id] = local_node_;
+}
+
+Cluster::Cluster(const CacheNode& local_node, std::size_t replication_factor, std::size_t cache_capacity)
+    : local_node_(local_node),
+      replication_factor_(replication_factor),
+      ring_(100),
+      local_cache_(cache_capacity, 16),
+      replication_mgr_(local_node.id, ReplicationMode::Sync) {
+    init_common();
+}
+
+Cluster::Cluster(const std::string& local_node_id, std::size_t replication_factor, std::size_t cache_capacity)
+    : local_node_{local_node_id, "127.0.0.1", 7001},
+      replication_factor_(replication_factor),
+      ring_(100),
+      local_cache_(cache_capacity, 16),
+      replication_mgr_(local_node_id, ReplicationMode::Sync) {
+    init_common();
 }
 
 void Cluster::add_node(const CacheNode& node) {
     nodes_[node.id] = node;
     ring_.add_node(node);
-    if (node.id != local_node_id_) {
+    if (node.id != local_node_.id) {
         health_checker_->add_node(node);
     }
 }
@@ -43,7 +55,7 @@ bool Cluster::set(
     std::optional<std::chrono::seconds> ttl
 ) {
     auto primary = ring_.locate(key);
-    if (!primary.has_value() || primary->id == local_node_id_) {
+    if (!primary.has_value() || primary->id == local_node_.id) {
         local_cache_.set(key, value, ttl);
         auto replicas = ring_.locate_replicas(key, replication_factor_);
         replication_mgr_.replicate_set(replicas, key, value, ttl);
@@ -67,7 +79,7 @@ bool Cluster::set(
 
 std::optional<std::string> Cluster::get(const std::string& key) {
     auto primary = ring_.locate(key);
-    if (!primary.has_value() || primary->id == local_node_id_) {
+    if (!primary.has_value() || primary->id == local_node_.id) {
         return local_cache_.get(key);
     }
 
@@ -84,7 +96,7 @@ std::optional<std::string> Cluster::get(const std::string& key) {
 
 bool Cluster::remove(const std::string& key) {
     auto primary = ring_.locate(key);
-    if (!primary.has_value() || primary->id == local_node_id_) {
+    if (!primary.has_value() || primary->id == local_node_.id) {
         auto replicas = ring_.locate_replicas(key, replication_factor_);
         replication_mgr_.replicate_delete(replicas, key);
         return local_cache_.remove(key);
@@ -100,7 +112,7 @@ bool Cluster::remove(const std::string& key) {
 
 bool Cluster::expire(const std::string& key, std::chrono::seconds ttl) {
     auto primary = ring_.locate(key);
-    if (!primary.has_value() || primary->id == local_node_id_) {
+    if (!primary.has_value() || primary->id == local_node_.id) {
         return local_cache_.expire(key, ttl);
     }
 
@@ -114,7 +126,7 @@ bool Cluster::expire(const std::string& key, std::chrono::seconds ttl) {
 
 std::optional<std::chrono::seconds> Cluster::ttl(const std::string& key) {
     auto primary = ring_.locate(key);
-    if (!primary.has_value() || primary->id == local_node_id_) {
+    if (!primary.has_value() || primary->id == local_node_.id) {
         return local_cache_.ttl(key);
     }
 
