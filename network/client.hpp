@@ -23,6 +23,13 @@ public:
     std::optional<int64_t> ttl(const std::string& key);
     bool ping();
 
+    // Internal replication methods — these send REPL_* commands so that
+    // the receiving node writes directly to its local cache without
+    // routing through its own cluster hash ring.
+    bool replica_set(const std::string& key, const std::string& value, std::optional<uint64_t> ttl = std::nullopt);
+    bool replica_delete(const std::string& key);
+    bool replica_expire(const std::string& key, uint64_t ttl_seconds);
+
 private:
     std::string send_raw(const std::string& command);
 

@@ -89,4 +89,20 @@ bool Client::ping() {
     return send_raw("PING") == "PONG";
 }
 
+bool Client::replica_set(const std::string& key, const std::string& value, std::optional<uint64_t> ttl) {
+    std::string cmd = "REPL_SET " + key + " " + value;
+    if (ttl.has_value()) {
+        cmd += " TTL " + std::to_string(ttl.value());
+    }
+    return send_raw(cmd) == "OK";
+}
+
+bool Client::replica_delete(const std::string& key) {
+    return send_raw("REPL_DELETE " + key) == "OK";
+}
+
+bool Client::replica_expire(const std::string& key, uint64_t ttl_seconds) {
+    return send_raw("REPL_EXPIRE " + key + " " + std::to_string(ttl_seconds)) == "OK";
+}
+
 } // namespace shardcache::network

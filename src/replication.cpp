@@ -29,7 +29,7 @@ bool ReplicationManager::replicate_set(
             if (ttl.has_value()) {
                 ttl_sec = static_cast<uint64_t>(ttl.value().count());
             }
-            bool success = client.set(key, value, ttl_sec);
+            bool success = client.replica_set(key, value, ttl_sec);
             if (!success) {
                 Logger::instance().warning("Failed replication SET to replica node " + node.id);
                 all_ok = false;
@@ -55,7 +55,7 @@ bool ReplicationManager::replicate_delete(
         Logger::instance().debug("Replicating DELETE for key '" + key + "' to node " + node.id);
         network::Client client(node.host, node.port);
         if (client.connect()) {
-            bool success = client.remove(key);
+            bool success = client.replica_delete(key);
             if (!success) {
                 all_ok = false;
             }
