@@ -57,6 +57,7 @@ public:
     );
 
     std::size_t node_count() const { return ring_.node_count(); }
+    std::optional<CacheNode> locate(const std::string& key) const { return ring_.locate(key); }
     ShardedCache& local_cache() { return local_cache_; }
 
     const CacheNode& local_node() const { return local_node_; }

@@ -72,9 +72,8 @@ bool Cluster::set(
         return client.set(key, value, ttl_sec);
     }
 
-    // Fallback locally if owner node unreachable
-    local_cache_.set(key, value, ttl);
-    return true;
+    Logger::instance().warning("Primary node " + primary->id + " unreachable for SET key '" + key + "'");
+    return false;
 }
 
 std::optional<std::string> Cluster::get(const std::string& key) {
@@ -86,12 +85,11 @@ std::optional<std::string> Cluster::get(const std::string& key) {
     Logger::instance().debug("Forwarding GET key '" + key + "' to primary node " + primary->id + " (" + primary->host + ":" + std::to_string(primary->port) + ")");
     network::Client client(primary->host, primary->port);
     if (client.connect()) {
-        auto val = client.get(key);
-        if (val.has_value()) return val;
+        return client.get(key);
     }
 
-    // Fallback to local cache in case of failover/replica read
-    return local_cache_.get(key);
+    Logger::instance().warning("Primary node " + primary->id + " unreachable for GET key '" + key + "'");
+    return std::nullopt;
 }
 
 bool Cluster::remove(const std::string& key) {
@@ -107,7 +105,8 @@ bool Cluster::remove(const std::string& key) {
         return client.remove(key);
     }
 
-    return local_cache_.remove(key);
+    Logger::instance().warning("Primary node " + primary->id + " unreachable for DELETE key '" + key + "'");
+    return false;
 }
 
 bool Cluster::expire(const std::string& key, std::chrono::seconds ttl) {
@@ -121,7 +120,8 @@ bool Cluster::expire(const std::string& key, std::chrono::seconds ttl) {
         return client.expire(key, static_cast<uint64_t>(ttl.count()));
     }
 
-    return local_cache_.expire(key, ttl);
+    Logger::instance().warning("Primary node " + primary->id + " unreachable for EXPIRE key '" + key + "'");
+    return false;
 }
 
 std::optional<std::chrono::seconds> Cluster::ttl(const std::string& key) {
@@ -136,9 +136,11 @@ std::optional<std::chrono::seconds> Cluster::ttl(const std::string& key) {
         if (val.has_value()) {
             return std::chrono::seconds(val.value());
         }
+        return std::nullopt;
     }
 
-    return local_cache_.ttl(key);
+    Logger::instance().warning("Primary node " + primary->id + " unreachable for TTL key '" + key + "'");
+    return std::nullopt;
 }
 
 std::string Cluster::get_or_load(
