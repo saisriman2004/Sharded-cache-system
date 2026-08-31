@@ -27,11 +27,11 @@ bool ReplicationManager::replicate_set(
         if (client.connect()) {
             std::optional<uint64_t> ttl_sec = std::nullopt;
             if (ttl.has_value()) {
-                ttl_sec = static_cast<uint64_t>(ttl.value().count());
+                 ttl_sec = static_cast<uint64_t>(ttl.value().count());
             }
-            bool success = client.replica_set(key, value, ttl_sec);
-            if (!success) {
-                Logger::instance().warning("Failed replication SET to replica node " + node.id);
+            auto res = client.replica_set(key, value, ttl_sec);
+            if (!res.is_ok()) {
+                Logger::instance().warning("Failed replication SET to replica node " + node.id + ": " + res.message);
                 all_ok = false;
             }
         } else {
@@ -55,8 +55,8 @@ bool ReplicationManager::replicate_delete(
         Logger::instance().debug("Replicating DELETE for key '" + key + "' to node " + node.id);
         network::Client client(node.host, node.port);
         if (client.connect()) {
-            bool success = client.replica_delete(key);
-            if (!success) {
+            auto res = client.replica_delete(key);
+            if (!res.is_ok()) {
                 all_ok = false;
             }
         } else {

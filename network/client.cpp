@@ -31,8 +31,10 @@ void Client::disconnect() {
     }
 }
 
-std::string Client::send_raw(const std::string& command) {
-    if (!connected_) return "";
+RequestResult<std::string> Client::send_raw(const std::string& command) {
+    if (!connected_) {
+        return RequestResult<std::string>::error(RequestStatus::ConnectionError, "Client is not connected");
+    }
     try {
         boost::asio::write(socket_, boost::asio::buffer(command + "\r\n"));
         boost::asio::streambuf response;
@@ -43,66 +45,99 @@ std::string Client::send_raw(const std::string& command) {
         if (!line.empty() && line.back() == '\r') {
             line.pop_back();
         }
-        return line;
+        return RequestResult<std::string>::success(line);
+    } catch (const std::exception& e) {
+        disconnect();
+        return RequestResult<std::string>::error(RequestStatus::ConnectionError, e.what());
     } catch (...) {
-        return "";
+        disconnect();
+        return RequestResult<std::string>::error(RequestStatus::ConnectionError, "Unknown socket error");
     }
 }
 
-bool Client::set(const std::string& key, const std::string& value, std::optional<uint64_t> ttl) {
+RequestResult<void> Client::set(const std::string& key, const std::string& value, std::optional<uint64_t> ttl) {
     std::string cmd = "SET " + key + " " + value;
     if (ttl.has_value()) {
         cmd += " TTL " + std::to_string(ttl.value());
     }
-    return send_raw(cmd) == "OK";
+    auto raw = send_raw(cmd);
+    if (!raw.is_ok()) return RequestResult<void>::error(raw.status, raw.message);
+    if (raw.value == "OK") return RequestResult<void>::success();
+    return RequestResult<void>::error(RequestStatus::ProtocolError, raw.value.value_or(""));
 }
 
-std::optional<std::string> Client::get(const std::string& key) {
-    std::string resp = send_raw("GET " + key);
-    if (resp.rfind("VALUE ", 0) == 0) {
-        return resp.substr(6);
+RequestResult<std::string> Client::get(const std::string& key) {
+    auto raw = send_raw("GET " + key);
+    if (!raw.is_ok()) return raw;
+    if (raw.value == "NOT_FOUND") {
+        return RequestResult<std::string>::not_found();
     }
-    return std::nullopt;
+    if (raw.value->rfind("VALUE ", 0) == 0) {
+        return RequestResult<std::string>::success(raw.value->substr(6));
+    }
+    return RequestResult<std::string>::error(RequestStatus::ProtocolError, raw.value.value_or(""));
 }
 
-bool Client::remove(const std::string& key) {
-    return send_raw("DELETE " + key) == "OK";
+RequestResult<void> Client::remove(const std::string& key) {
+    auto raw = send_raw("DELETE " + key);
+    if (!raw.is_ok()) return RequestResult<void>::error(raw.status, raw.message);
+    if (raw.value == "OK") return RequestResult<void>::success();
+    if (raw.value == "NOT_FOUND") return RequestResult<void>::not_found();
+    return RequestResult<void>::error(RequestStatus::ProtocolError, raw.value.value_or(""));
 }
 
-bool Client::expire(const std::string& key, uint64_t ttl_seconds) {
-    return send_raw("EXPIRE " + key + " " + std::to_string(ttl_seconds)) == "OK";
+RequestResult<void> Client::expire(const std::string& key, uint64_t ttl_seconds) {
+    auto raw = send_raw("EXPIRE " + key + " " + std::to_string(ttl_seconds));
+    if (!raw.is_ok()) return RequestResult<void>::error(raw.status, raw.message);
+    if (raw.value == "OK") return RequestResult<void>::success();
+    if (raw.value == "NOT_FOUND") return RequestResult<void>::not_found();
+    return RequestResult<void>::error(RequestStatus::ProtocolError, raw.value.value_or(""));
 }
 
-std::optional<int64_t> Client::ttl(const std::string& key) {
-    std::string resp = send_raw("TTL " + key);
-    if (resp.rfind("INT ", 0) == 0) {
+RequestResult<int64_t> Client::ttl(const std::string& key) {
+    auto raw = send_raw("TTL " + key);
+    if (!raw.is_ok()) return RequestResult<int64_t>::error(raw.status, raw.message);
+    if (raw.value == "NOT_FOUND") return RequestResult<int64_t>::not_found();
+    if (raw.value->rfind("INT ", 0) == 0) {
         try {
-            return std::stoll(resp.substr(4));
+            return RequestResult<int64_t>::success(std::stoll(raw.value->substr(4)));
         } catch (...) {
-            return std::nullopt;
+            return RequestResult<int64_t>::error(RequestStatus::ProtocolError, "Invalid integer response");
         }
     }
-    return std::nullopt;
+    return RequestResult<int64_t>::error(RequestStatus::ProtocolError, raw.value.value_or(""));
 }
 
 bool Client::ping() {
-    return send_raw("PING") == "PONG";
+    auto raw = send_raw("PING");
+    return raw.is_ok() && raw.value == "PONG";
 }
 
-bool Client::replica_set(const std::string& key, const std::string& value, std::optional<uint64_t> ttl) {
+RequestResult<void> Client::replica_set(const std::string& key, const std::string& value, std::optional<uint64_t> ttl) {
     std::string cmd = "REPL_SET " + key + " " + value;
     if (ttl.has_value()) {
         cmd += " TTL " + std::to_string(ttl.value());
     }
-    return send_raw(cmd) == "OK";
+    auto raw = send_raw(cmd);
+    if (!raw.is_ok()) return RequestResult<void>::error(raw.status, raw.message);
+    if (raw.value == "OK") return RequestResult<void>::success();
+    return RequestResult<void>::error(RequestStatus::ProtocolError, raw.value.value_or(""));
 }
 
-bool Client::replica_delete(const std::string& key) {
-    return send_raw("REPL_DELETE " + key) == "OK";
+RequestResult<void> Client::replica_delete(const std::string& key) {
+    auto raw = send_raw("REPL_DELETE " + key);
+    if (!raw.is_ok()) return RequestResult<void>::error(raw.status, raw.message);
+    if (raw.value == "OK") return RequestResult<void>::success();
+    if (raw.value == "NOT_FOUND") return RequestResult<void>::not_found();
+    return RequestResult<void>::error(RequestStatus::ProtocolError, raw.value.value_or(""));
 }
 
-bool Client::replica_expire(const std::string& key, uint64_t ttl_seconds) {
-    return send_raw("REPL_EXPIRE " + key + " " + std::to_string(ttl_seconds)) == "OK";
+RequestResult<void> Client::replica_expire(const std::string& key, uint64_t ttl_seconds) {
+    auto raw = send_raw("REPL_EXPIRE " + key + " " + std::to_string(ttl_seconds));
+    if (!raw.is_ok()) return RequestResult<void>::error(raw.status, raw.message);
+    if (raw.value == "OK") return RequestResult<void>::success();
+    if (raw.value == "NOT_FOUND") return RequestResult<void>::not_found();
+    return RequestResult<void>::error(RequestStatus::ProtocolError, raw.value.value_or(""));
 }
 
 } // namespace shardcache::network

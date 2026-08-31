@@ -69,7 +69,8 @@ bool Cluster::set(
         if (ttl.has_value()) {
             ttl_sec = static_cast<uint64_t>(ttl.value().count());
         }
-        return client.set(key, value, ttl_sec);
+        auto res = client.set(key, value, ttl_sec);
+        return res.is_ok();
     }
 
     Logger::instance().warning("Primary node " + primary->id + " unreachable for SET key '" + key + "'");
@@ -85,7 +86,15 @@ std::optional<std::string> Cluster::get(const std::string& key) {
     Logger::instance().debug("Forwarding GET key '" + key + "' to primary node " + primary->id + " (" + primary->host + ":" + std::to_string(primary->port) + ")");
     network::Client client(primary->host, primary->port);
     if (client.connect()) {
-        return client.get(key);
+        auto res = client.get(key);
+        if (res.is_ok()) {
+            return res.value;
+        }
+        if (res.is_not_found()) {
+            return std::nullopt;
+        }
+        Logger::instance().warning("Error retrieving key '" + key + "' from primary node " + primary->id + ": " + res.message);
+        return std::nullopt;
     }
 
     Logger::instance().warning("Primary node " + primary->id + " unreachable for GET key '" + key + "'");
@@ -102,7 +111,8 @@ bool Cluster::remove(const std::string& key) {
 
     network::Client client(primary->host, primary->port);
     if (client.connect()) {
-        return client.remove(key);
+        auto res = client.remove(key);
+        return res.is_ok();
     }
 
     Logger::instance().warning("Primary node " + primary->id + " unreachable for DELETE key '" + key + "'");
@@ -117,7 +127,8 @@ bool Cluster::expire(const std::string& key, std::chrono::seconds ttl) {
 
     network::Client client(primary->host, primary->port);
     if (client.connect()) {
-        return client.expire(key, static_cast<uint64_t>(ttl.count()));
+        auto res = client.expire(key, static_cast<uint64_t>(ttl.count()));
+        return res.is_ok();
     }
 
     Logger::instance().warning("Primary node " + primary->id + " unreachable for EXPIRE key '" + key + "'");
@@ -132,9 +143,9 @@ std::optional<std::chrono::seconds> Cluster::ttl(const std::string& key) {
 
     network::Client client(primary->host, primary->port);
     if (client.connect()) {
-        auto val = client.ttl(key);
-        if (val.has_value()) {
-            return std::chrono::seconds(val.value());
+        auto res = client.ttl(key);
+        if (res.is_ok() && res.value.has_value()) {
+            return std::chrono::seconds(res.value.value());
         }
         return std::nullopt;
     }
