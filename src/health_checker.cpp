@@ -51,6 +51,8 @@ void HealthChecker::run_check() {
         target_nodes = nodes_;
     }
 
+    std::vector<std::pair<std::string, bool>> events;
+
     for (const auto& node : target_nodes) {
         bool healthy = false;
         network::Client client(node.host, node.port);
@@ -58,20 +60,24 @@ void HealthChecker::run_check() {
             healthy = true;
         }
 
-        std::lock_guard lock(nodes_mutex_);
-        if (healthy) {
-            failure_counts_[node.id] = 0;
-            if (callback_) {
-                callback_(node.id, true);
-            }
-        } else {
-            failure_counts_[node.id]++;
-            if (failure_counts_[node.id] >= 3) {
-                Logger::instance().warning("Node " + node.id + " failed 3 consecutive TCP PING checks!");
-                if (callback_) {
-                    callback_(node.id, false);
+        {
+            std::lock_guard lock(nodes_mutex_);
+            if (healthy) {
+                failure_counts_[node.id] = 0;
+                events.emplace_back(node.id, true);
+            } else {
+                failure_counts_[node.id]++;
+                if (failure_counts_[node.id] >= 3) {
+                    Logger::instance().warning("Node " + node.id + " failed 3 consecutive TCP PING checks!");
+                    events.emplace_back(node.id, false);
                 }
             }
+        }
+    }
+
+    if (callback_) {
+        for (const auto& [node_id, is_healthy] : events) {
+            callback_(node_id, is_healthy);
         }
     }
 }
