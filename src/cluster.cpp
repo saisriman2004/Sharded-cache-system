@@ -8,8 +8,9 @@ namespace shardcache {
 void Cluster::init_common() {
     health_checker_ = std::make_unique<HealthChecker>([this](const std::string& node_id, bool healthy) {
         if (!healthy) {
-            Logger::instance().warning("Node " + node_id + " failed health check! Removing from hash ring.");
-            this->remove_node(node_id);
+            Logger::instance().warning("Node " + node_id + " failed health check!");
+        } else {
+            Logger::instance().info("Node " + node_id + " is healthy.");
         }
     });
 
@@ -33,6 +34,22 @@ Cluster::Cluster(const std::string& local_node_id, std::size_t replication_facto
       local_cache_(cache_capacity, 16),
       replication_mgr_(local_node_id, ReplicationMode::Sync) {
     init_common();
+}
+
+Cluster::~Cluster() {
+    stop();
+}
+
+void Cluster::start() {
+    if (health_checker_) {
+        health_checker_->start();
+    }
+}
+
+void Cluster::stop() {
+    if (health_checker_) {
+        health_checker_->stop();
+    }
 }
 
 void Cluster::add_node(const CacheNode& node) {

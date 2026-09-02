@@ -32,7 +32,10 @@ public:
         std::size_t cache_capacity = 100000
     );
 
-    ~Cluster() = default;
+    ~Cluster();
+
+    void start();
+    void stop();
 
     void add_node(const CacheNode& node);
     void remove_node(const std::string& node_id);

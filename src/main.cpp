@@ -58,6 +58,7 @@ int main(int argc, char* argv[]) {
     }
 
     cluster.local_cache().set("welcome", "ShardCache-v1.0-C++20");
+    cluster.start();
 
     try {
         boost::asio::io_context io_context;
