@@ -7,8 +7,8 @@
 #include "shardcache/health_checker.hpp"
 #include <memory>
 #include <string>
-
 #include <unordered_map>
+#include <shared_mutex>
 
 namespace shardcache {
 
@@ -59,8 +59,8 @@ public:
         std::optional<std::chrono::seconds> ttl = std::nullopt
     );
 
-    std::size_t node_count() const { return ring_.node_count(); }
-    std::optional<CacheNode> locate(const std::string& key) const { return ring_.locate(key); }
+    std::size_t node_count() const;
+    std::optional<CacheNode> locate(const std::string& key) const;
     ShardedCache& local_cache() { return local_cache_; }
 
     const CacheNode& local_node() const { return local_node_; }
@@ -75,6 +75,7 @@ private:
     ReplicationManager replication_mgr_;
     std::unique_ptr<HealthChecker> health_checker_;
     std::unordered_map<std::string, CacheNode> nodes_;
+    mutable std::shared_mutex membership_mutex_;
 };
 
 } // namespace shardcache

@@ -53,17 +53,33 @@ void Cluster::stop() {
 }
 
 void Cluster::add_node(const CacheNode& node) {
-    nodes_[node.id] = node;
-    ring_.add_node(node);
+    {
+        std::unique_lock lock(membership_mutex_);
+        nodes_[node.id] = node;
+        ring_.add_node(node);
+    }
     if (node.id != local_node_.id) {
         health_checker_->add_node(node);
     }
 }
 
 void Cluster::remove_node(const std::string& node_id) {
-    ring_.remove_node(node_id);
+    {
+        std::unique_lock lock(membership_mutex_);
+        ring_.remove_node(node_id);
+        nodes_.erase(node_id);
+    }
     health_checker_->remove_node(node_id);
-    nodes_.erase(node_id);
+}
+
+std::size_t Cluster::node_count() const {
+    std::shared_lock lock(membership_mutex_);
+    return ring_.node_count();
+}
+
+std::optional<CacheNode> Cluster::locate(const std::string& key) const {
+    std::shared_lock lock(membership_mutex_);
+    return ring_.locate(key);
 }
 
 bool Cluster::set(
@@ -71,10 +87,18 @@ bool Cluster::set(
     const std::string& value,
     std::optional<std::chrono::seconds> ttl
 ) {
-    auto primary = ring_.locate(key);
+    std::optional<CacheNode> primary;
+    std::vector<CacheNode> replicas;
+    {
+        std::shared_lock lock(membership_mutex_);
+        primary = ring_.locate(key);
+        if (!primary.has_value() || primary->id == local_node_.id) {
+            replicas = ring_.locate_replicas(key, replication_factor_);
+        }
+    }
+
     if (!primary.has_value() || primary->id == local_node_.id) {
         local_cache_.set(key, value, ttl);
-        auto replicas = ring_.locate_replicas(key, replication_factor_);
         replication_mgr_.replicate_set(replicas, key, value, ttl);
         return true;
     }
@@ -95,7 +119,12 @@ bool Cluster::set(
 }
 
 std::optional<std::string> Cluster::get(const std::string& key) {
-    auto primary = ring_.locate(key);
+    std::optional<CacheNode> primary;
+    {
+        std::shared_lock lock(membership_mutex_);
+        primary = ring_.locate(key);
+    }
+
     if (!primary.has_value() || primary->id == local_node_.id) {
         return local_cache_.get(key);
     }
@@ -119,9 +148,17 @@ std::optional<std::string> Cluster::get(const std::string& key) {
 }
 
 bool Cluster::remove(const std::string& key) {
-    auto primary = ring_.locate(key);
+    std::optional<CacheNode> primary;
+    std::vector<CacheNode> replicas;
+    {
+        std::shared_lock lock(membership_mutex_);
+        primary = ring_.locate(key);
+        if (!primary.has_value() || primary->id == local_node_.id) {
+            replicas = ring_.locate_replicas(key, replication_factor_);
+        }
+    }
+
     if (!primary.has_value() || primary->id == local_node_.id) {
-        auto replicas = ring_.locate_replicas(key, replication_factor_);
         replication_mgr_.replicate_delete(replicas, key);
         return local_cache_.remove(key);
     }
@@ -137,7 +174,12 @@ bool Cluster::remove(const std::string& key) {
 }
 
 bool Cluster::expire(const std::string& key, std::chrono::seconds ttl) {
-    auto primary = ring_.locate(key);
+    std::optional<CacheNode> primary;
+    {
+        std::shared_lock lock(membership_mutex_);
+        primary = ring_.locate(key);
+    }
+
     if (!primary.has_value() || primary->id == local_node_.id) {
         return local_cache_.expire(key, ttl);
     }
@@ -153,7 +195,12 @@ bool Cluster::expire(const std::string& key, std::chrono::seconds ttl) {
 }
 
 std::optional<std::chrono::seconds> Cluster::ttl(const std::string& key) {
-    auto primary = ring_.locate(key);
+    std::optional<CacheNode> primary;
+    {
+        std::shared_lock lock(membership_mutex_);
+        primary = ring_.locate(key);
+    }
+
     if (!primary.has_value() || primary->id == local_node_.id) {
         return local_cache_.ttl(key);
     }
