@@ -42,3 +42,24 @@ TEST(HealthCheckerTest, CallbackDoesNotDeadlockOnRemoveNode) {
     EXPECT_TRUE(callback_executed.load());
 }
 
+TEST(HealthCheckerTest, NodeHealthTransitionAndRecovery) {
+    std::atomic<bool> marked_unhealthy{false};
+
+    shardcache::HealthChecker checker([&](const std::string& node_id, bool healthy) {
+        if (node_id == "unhealthy_node" && !healthy) {
+            marked_unhealthy.store(true);
+        }
+    }, std::chrono::milliseconds(25));
+
+    checker.add_node({"unhealthy_node", "127.0.0.1", 19997});
+    EXPECT_EQ(checker.get_node_health("unhealthy_node"), shardcache::NodeHealth::Healthy);
+
+    checker.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(160));
+    checker.stop();
+
+    EXPECT_TRUE(marked_unhealthy.load());
+    EXPECT_EQ(checker.get_node_health("unhealthy_node"), shardcache::NodeHealth::Unhealthy);
+}
+
+

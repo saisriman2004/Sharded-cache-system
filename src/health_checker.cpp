@@ -14,7 +14,7 @@ HealthChecker::~HealthChecker() {
 void HealthChecker::add_node(const CacheNode& node) {
     std::lock_guard lock(nodes_mutex_);
     nodes_.push_back(node);
-    failure_counts_[node.id] = 0;
+    node_states_[node.id] = NodeHealthState{NodeHealth::Healthy, 0, 0};
 }
 
 void HealthChecker::remove_node(const std::string& node_id) {
@@ -23,7 +23,16 @@ void HealthChecker::remove_node(const std::string& node_id) {
         std::remove_if(nodes_.begin(), nodes_.end(), [&node_id](const CacheNode& n) { return n.id == node_id; }),
         nodes_.end()
     );
-    failure_counts_.erase(node_id);
+    node_states_.erase(node_id);
+}
+
+NodeHealth HealthChecker::get_node_health(const std::string& node_id) const {
+    std::lock_guard lock(nodes_mutex_);
+    auto it = node_states_.find(node_id);
+    if (it != node_states_.end()) {
+        return it->second.status;
+    }
+    return NodeHealth::Unhealthy;
 }
 
 void HealthChecker::start() {
@@ -62,12 +71,23 @@ void HealthChecker::run_check() {
 
         {
             std::lock_guard lock(nodes_mutex_);
+            auto& state = node_states_[node.id];
             if (healthy) {
-                failure_counts_[node.id] = 0;
-                events.emplace_back(node.id, true);
+                state.failures = 0;
+                state.successes++;
+                if (state.status != NodeHealth::Healthy && state.successes >= 2) {
+                    state.status = NodeHealth::Healthy;
+                    Logger::instance().info("Node " + node.id + " recovered and passed health checks!");
+                    events.emplace_back(node.id, true);
+                }
             } else {
-                failure_counts_[node.id]++;
-                if (failure_counts_[node.id] >= 3) {
+                state.successes = 0;
+                state.failures++;
+                if (state.status == NodeHealth::Healthy && state.failures >= 1) {
+                    state.status = NodeHealth::Suspect;
+                }
+                if (state.status != NodeHealth::Unhealthy && state.failures >= 3) {
+                    state.status = NodeHealth::Unhealthy;
                     Logger::instance().warning("Node " + node.id + " failed 3 consecutive TCP PING checks!");
                     events.emplace_back(node.id, false);
                 }

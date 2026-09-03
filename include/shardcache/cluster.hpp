@@ -61,6 +61,7 @@ public:
 
     std::size_t node_count() const;
     std::optional<CacheNode> locate(const std::string& key) const;
+    bool is_node_healthy(const std::string& node_id) const;
     ShardedCache& local_cache() { return local_cache_; }
 
     const CacheNode& local_node() const { return local_node_; }
@@ -75,6 +76,7 @@ private:
     ReplicationManager replication_mgr_;
     std::unique_ptr<HealthChecker> health_checker_;
     std::unordered_map<std::string, CacheNode> nodes_;
+    std::unordered_map<std::string, bool> node_health_;
     mutable std::shared_mutex membership_mutex_;
 };
 

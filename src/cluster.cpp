@@ -7,15 +7,18 @@ namespace shardcache {
 // Common initialization shared by both constructors.
 void Cluster::init_common() {
     health_checker_ = std::make_unique<HealthChecker>([this](const std::string& node_id, bool healthy) {
+        std::unique_lock lock(membership_mutex_);
+        node_health_[node_id] = healthy;
         if (!healthy) {
-            Logger::instance().warning("Node " + node_id + " failed health check!");
+            Logger::instance().warning("Node " + node_id + " marked unhealthy in cluster routing.");
         } else {
-            Logger::instance().info("Node " + node_id + " is healthy.");
+            Logger::instance().info("Node " + node_id + " marked healthy in cluster routing.");
         }
     });
 
     ring_.add_node(local_node_);
     nodes_[local_node_.id] = local_node_;
+    node_health_[local_node_.id] = true;
 }
 
 Cluster::Cluster(const CacheNode& local_node, std::size_t replication_factor, std::size_t cache_capacity)
@@ -57,6 +60,7 @@ void Cluster::add_node(const CacheNode& node) {
         std::unique_lock lock(membership_mutex_);
         nodes_[node.id] = node;
         ring_.add_node(node);
+        node_health_[node.id] = true;
     }
     if (node.id != local_node_.id) {
         health_checker_->add_node(node);
@@ -68,6 +72,7 @@ void Cluster::remove_node(const std::string& node_id) {
         std::unique_lock lock(membership_mutex_);
         ring_.remove_node(node_id);
         nodes_.erase(node_id);
+        node_health_.erase(node_id);
     }
     health_checker_->remove_node(node_id);
 }
@@ -79,7 +84,28 @@ std::size_t Cluster::node_count() const {
 
 std::optional<CacheNode> Cluster::locate(const std::string& key) const {
     std::shared_lock lock(membership_mutex_);
-    return ring_.locate(key);
+    auto primary = ring_.locate(key);
+    if (!primary.has_value()) return std::nullopt;
+    auto it = node_health_.find(primary->id);
+    if (it != node_health_.end() && !it->second) {
+        auto replicas = ring_.locate_replicas(key, replication_factor_);
+        for (const auto& rep : replicas) {
+            auto rep_it = node_health_.find(rep.id);
+            if (rep_it == node_health_.end() || rep_it->second) {
+                return rep;
+            }
+        }
+    }
+    return primary;
+}
+
+bool Cluster::is_node_healthy(const std::string& node_id) const {
+    std::shared_lock lock(membership_mutex_);
+    auto it = node_health_.find(node_id);
+    if (it != node_health_.end()) {
+        return it->second;
+    }
+    return true;
 }
 
 bool Cluster::set(

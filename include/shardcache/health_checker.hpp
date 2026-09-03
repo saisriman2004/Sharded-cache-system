@@ -13,6 +13,18 @@
 
 namespace shardcache {
 
+enum class NodeHealth {
+    Healthy,
+    Suspect,
+    Unhealthy
+};
+
+struct NodeHealthState {
+    NodeHealth status{NodeHealth::Healthy};
+    int failures{0};
+    int successes{0};
+};
+
 class HealthChecker {
 public:
     using HealthCallback = std::function<void(const std::string& node_id, bool is_healthy)>;
@@ -26,6 +38,8 @@ public:
     void start();
     void stop();
 
+    NodeHealth get_node_health(const std::string& node_id) const;
+
 private:
     void run_check();
 
@@ -33,9 +47,9 @@ private:
     std::chrono::milliseconds interval_;
     std::atomic<bool> running_{false};
     std::thread worker_;
-    std::mutex nodes_mutex_;
+    mutable std::mutex nodes_mutex_;
     std::vector<CacheNode> nodes_;
-    std::unordered_map<std::string, int> failure_counts_;
+    std::unordered_map<std::string, NodeHealthState> node_states_;
 };
 
 } // namespace shardcache
