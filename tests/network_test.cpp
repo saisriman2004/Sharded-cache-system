@@ -47,3 +47,13 @@ TEST(NetworkTest, ServerClientInteraction) {
         io_thread.join();
     }
 }
+
+TEST(NetworkTest, ConnectTimeout) {
+    // Attempting to connect to an unreachable black-hole address with 100ms timeout
+    shardcache::network::Client client("10.255.255.1", 81, std::chrono::milliseconds(100), std::chrono::milliseconds(100));
+    auto start = std::chrono::steady_clock::now();
+    bool connected = client.connect();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+    EXPECT_FALSE(connected);
+    EXPECT_LT(elapsed.count(), 2000);
+}

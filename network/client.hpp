@@ -12,7 +12,12 @@ namespace shardcache::network {
 
 class Client {
 public:
-    Client(const std::string& host, uint16_t port);
+    Client(
+        const std::string& host,
+        uint16_t port,
+        std::chrono::milliseconds connect_timeout = std::chrono::milliseconds(2000),
+        std::chrono::milliseconds io_timeout = std::chrono::milliseconds(3000)
+    );
     ~Client();
 
     bool connect();
@@ -37,6 +42,8 @@ private:
 
     std::string host_;
     uint16_t port_;
+    std::chrono::milliseconds connect_timeout_;
+    std::chrono::milliseconds io_timeout_;
     boost::asio::io_context io_context_;
     boost::asio::ip::tcp::socket socket_;
     bool connected_{false};

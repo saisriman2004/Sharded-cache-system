@@ -3,8 +3,17 @@
 
 namespace shardcache::network {
 
-Client::Client(const std::string& host, uint16_t port)
-    : host_(host), port_(port), socket_(io_context_) {}
+Client::Client(
+    const std::string& host,
+    uint16_t port,
+    std::chrono::milliseconds connect_timeout,
+    std::chrono::milliseconds io_timeout
+)
+    : host_(host),
+      port_(port),
+      connect_timeout_(connect_timeout),
+      io_timeout_(io_timeout),
+      socket_(io_context_) {}
 
 Client::~Client() {
     disconnect();
@@ -12,9 +21,40 @@ Client::~Client() {
 
 bool Client::connect() {
     try {
+        io_context_.restart();
         boost::asio::ip::tcp::resolver resolver(io_context_);
         auto endpoints = resolver.resolve(host_, std::to_string(port_));
-        boost::asio::connect(socket_, endpoints);
+
+        boost::asio::steady_timer timer(io_context_);
+        timer.expires_after(connect_timeout_);
+
+        boost::system::error_code connect_ec = boost::asio::error::would_block;
+        bool timed_out = false;
+
+        boost::asio::async_connect(
+            socket_,
+            endpoints,
+            [&connect_ec, &timer](const boost::system::error_code& ec, const boost::asio::ip::tcp::endpoint&) {
+                connect_ec = ec;
+                timer.cancel();
+            }
+        );
+
+        timer.async_wait([&](const boost::system::error_code& ec) {
+            if (!ec) {
+                timed_out = true;
+                boost::system::error_code close_ec;
+                socket_.close(close_ec);
+            }
+        });
+
+        io_context_.run();
+
+        if (timed_out || connect_ec) {
+            connected_ = false;
+            return false;
+        }
+
         connected_ = true;
         return true;
     } catch (...) {
@@ -35,10 +75,58 @@ RequestResult<std::string> Client::send_raw(const std::string& command) {
     if (!connected_) {
         return RequestResult<std::string>::error(RequestStatus::ConnectionError, "Client is not connected");
     }
+
     try {
-        boost::asio::write(socket_, boost::asio::buffer(command + "\r\n"));
+        io_context_.restart();
+
+        boost::asio::steady_timer timer(io_context_);
+        timer.expires_after(io_timeout_);
+
+        boost::system::error_code op_ec = boost::asio::error::would_block;
+        bool timed_out = false;
         boost::asio::streambuf response;
-        boost::asio::read_until(socket_, response, "\r\n");
+
+        boost::asio::async_write(
+            socket_,
+            boost::asio::buffer(command + "\r\n"),
+            [&](const boost::system::error_code& ec, std::size_t) {
+                if (!ec) {
+                    boost::asio::async_read_until(
+                        socket_,
+                        response,
+                        "\r\n",
+                        [&](const boost::system::error_code& read_ec, std::size_t) {
+                            op_ec = read_ec;
+                            timer.cancel();
+                        }
+                    );
+                } else {
+                    op_ec = ec;
+                    timer.cancel();
+                }
+            }
+        );
+
+        timer.async_wait([&](const boost::system::error_code& ec) {
+            if (!ec) {
+                timed_out = true;
+                boost::system::error_code close_ec;
+                socket_.close(close_ec);
+            }
+        });
+
+        io_context_.run();
+
+        if (timed_out) {
+            disconnect();
+            return RequestResult<std::string>::error(RequestStatus::Timeout, "Operation timed out");
+        }
+
+        if (op_ec) {
+            disconnect();
+            return RequestResult<std::string>::error(RequestStatus::ConnectionError, op_ec.message());
+        }
+
         std::istream is(&response);
         std::string line;
         std::getline(is, line);
