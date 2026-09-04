@@ -35,6 +35,12 @@ public:
         const std::string& key
     );
 
+    bool replicate_expire(
+        const std::vector<CacheNode>& replicas,
+        const std::string& key,
+        std::chrono::seconds ttl
+    );
+
     ReplicationMode mode() const { return mode_; }
 
 private:

@@ -125,7 +125,12 @@ bool Cluster::set(
 
     if (!primary.has_value() || primary->id == local_node_.id) {
         local_cache_.set(key, value, ttl);
-        replication_mgr_.replicate_set(replicas, key, value, ttl);
+        bool repl_ok = replication_mgr_.replicate_set(replicas, key, value, ttl);
+        if (replication_mgr_.mode() == ReplicationMode::Sync && !repl_ok) {
+            local_cache_.remove(key);
+            Logger::instance().warning("Sync replication failed for key '" + key + "', write rolled back");
+            return false;
+        }
         return true;
     }
 
@@ -185,8 +190,13 @@ bool Cluster::remove(const std::string& key) {
     }
 
     if (!primary.has_value() || primary->id == local_node_.id) {
-        replication_mgr_.replicate_delete(replicas, key);
-        return local_cache_.remove(key);
+        bool repl_ok = replication_mgr_.replicate_delete(replicas, key);
+        bool removed = local_cache_.remove(key);
+        if (replication_mgr_.mode() == ReplicationMode::Sync && !repl_ok) {
+            Logger::instance().warning("Sync replication failed for DELETE key '" + key + "'");
+            return false;
+        }
+        return removed;
     }
 
     network::Client client(primary->host, primary->port);
@@ -201,13 +211,23 @@ bool Cluster::remove(const std::string& key) {
 
 bool Cluster::expire(const std::string& key, std::chrono::seconds ttl) {
     std::optional<CacheNode> primary;
+    std::vector<CacheNode> replicas;
     {
         std::shared_lock lock(membership_mutex_);
         primary = ring_.locate(key);
+        if (!primary.has_value() || primary->id == local_node_.id) {
+            replicas = ring_.locate_replicas(key, replication_factor_);
+        }
     }
 
     if (!primary.has_value() || primary->id == local_node_.id) {
-        return local_cache_.expire(key, ttl);
+        bool repl_ok = replication_mgr_.replicate_expire(replicas, key, ttl);
+        bool ok = local_cache_.expire(key, ttl);
+        if (replication_mgr_.mode() == ReplicationMode::Sync && !repl_ok) {
+            Logger::instance().warning("Sync replication failed for EXPIRE key '" + key + "'");
+            return false;
+        }
+        return ok;
     }
 
     network::Client client(primary->host, primary->port);

@@ -66,4 +66,29 @@ bool ReplicationManager::replicate_delete(
     return all_ok;
 }
 
+bool ReplicationManager::replicate_expire(
+    const std::vector<CacheNode>& replicas,
+    const std::string& key,
+    std::chrono::seconds ttl
+) {
+    if (replicas.empty()) return true;
+
+    bool all_ok = true;
+    for (const auto& node : replicas) {
+        if (!local_node_id_.empty() && node.id == local_node_id_) continue;
+
+        Logger::instance().debug("Replicating EXPIRE for key '" + key + "' to node " + node.id);
+        network::Client client(node.host, node.port);
+        if (client.connect()) {
+            auto res = client.replica_expire(key, static_cast<uint64_t>(ttl.count()));
+            if (!res.is_ok()) {
+                all_ok = false;
+            }
+        } else {
+            all_ok = false;
+        }
+    }
+    return all_ok;
+}
+
 } // namespace shardcache
