@@ -82,6 +82,18 @@ if(BUILD_TESTING)
 
   target_link_libraries(cache_test PRIVATE shardcache_lib gtest_main)
 
+  add_executable(integration_test
+    tests/integration_test.cpp
+  )
+  target_include_directories(integration_test PRIVATE
+    ${googletest_SOURCE_DIR}/googletest/include
+    ${googletest_SOURCE_DIR}/googlemock/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/protocol
+    ${CMAKE_CURRENT_SOURCE_DIR}/network
+  )
+  target_link_libraries(integration_test PRIVATE shardcache_lib gtest_main)
+
   add_executable(cache_benchmark
     benchmarks/cache_benchmark.cpp
   )
@@ -89,4 +101,5 @@ if(BUILD_TESTING)
 
   include(GoogleTest)
   gtest_discover_tests(cache_test)
+  gtest_discover_tests(integration_test)
 endif()
