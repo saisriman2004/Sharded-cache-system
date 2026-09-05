@@ -99,6 +99,11 @@ std::optional<CacheNode> Cluster::locate(const std::string& key) const {
     return primary;
 }
 
+std::vector<CacheNode> Cluster::locate_replicas(const std::string& key, std::size_t count) const {
+    std::shared_lock lock(membership_mutex_);
+    return ring_.locate_replicas(key, count);
+}
+
 bool Cluster::is_node_healthy(const std::string& node_id) const {
     std::shared_lock lock(membership_mutex_);
     auto it = node_health_.find(node_id);
@@ -106,6 +111,16 @@ bool Cluster::is_node_healthy(const std::string& node_id) const {
         return it->second;
     }
     return true;
+}
+
+void Cluster::set_node_health(const std::string& node_id, bool healthy) {
+    std::unique_lock lock(membership_mutex_);
+    node_health_[node_id] = healthy;
+    if (!healthy) {
+        Logger::instance().warning("Node " + node_id + " marked unhealthy in cluster routing.");
+    } else {
+        Logger::instance().info("Node " + node_id + " marked healthy in cluster routing.");
+    }
 }
 
 bool Cluster::set(
@@ -150,18 +165,18 @@ bool Cluster::set(
 }
 
 std::optional<std::string> Cluster::get(const std::string& key) {
-    std::optional<CacheNode> primary;
-    {
-        std::shared_lock lock(membership_mutex_);
-        primary = ring_.locate(key);
+    auto target = locate(key);
+    if (!target.has_value()) {
+        Logger::instance().warning("No healthy node available to serve GET for key '" + key + "'");
+        return std::nullopt;
     }
 
-    if (!primary.has_value() || primary->id == local_node_.id) {
+    if (target->id == local_node_.id) {
         return local_cache_.get(key);
     }
 
-    Logger::instance().debug("Forwarding GET key '" + key + "' to primary node " + primary->id + " (" + primary->host + ":" + std::to_string(primary->port) + ")");
-    network::Client client(primary->host, primary->port);
+    Logger::instance().debug("Forwarding GET key '" + key + "' to target node " + target->id + " (" + target->host + ":" + std::to_string(target->port) + ")");
+    network::Client client(target->host, target->port);
     if (client.connect()) {
         auto res = client.get(key);
         if (res.is_ok()) {
@@ -170,12 +185,16 @@ std::optional<std::string> Cluster::get(const std::string& key) {
         if (res.is_not_found()) {
             return std::nullopt;
         }
-        Logger::instance().warning("Error retrieving key '" + key + "' from primary node " + primary->id + ": " + res.message);
+        Logger::instance().warning("Error retrieving key '" + key + "' from node " + target->id + ": " + res.message);
         return std::nullopt;
     }
 
-    Logger::instance().warning("Primary node " + primary->id + " unreachable for GET key '" + key + "'");
+    Logger::instance().warning("Target node " + target->id + " unreachable for GET key '" + key + "'");
     return std::nullopt;
+}
+
+bool Cluster::exists(const std::string& key) {
+    return get(key).has_value();
 }
 
 bool Cluster::remove(const std::string& key) {

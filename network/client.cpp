@@ -86,9 +86,11 @@ RequestResult<std::string> Client::send_raw(const std::string& command) {
         bool timed_out = false;
         boost::asio::streambuf response;
 
+        std::string request = command + "\r\n";
+
         boost::asio::async_write(
             socket_,
-            boost::asio::buffer(command + "\r\n"),
+            boost::asio::buffer(request),
             [&](const boost::system::error_code& ec, std::size_t) {
                 if (!ec) {
                     boost::asio::async_read_until(

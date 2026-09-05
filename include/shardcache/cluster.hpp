@@ -47,6 +47,7 @@ public:
     );
 
     std::optional<std::string> get(const std::string& key);
+    bool exists(const std::string& key);
 
     bool remove(const std::string& key);
 
@@ -61,7 +62,9 @@ public:
 
     std::size_t node_count() const;
     std::optional<CacheNode> locate(const std::string& key) const;
+    std::vector<CacheNode> locate_replicas(const std::string& key, std::size_t count) const;
     bool is_node_healthy(const std::string& node_id) const;
+    void set_node_health(const std::string& node_id, bool healthy);
     ShardedCache& local_cache() { return local_cache_; }
 
     const CacheNode& local_node() const { return local_node_; }

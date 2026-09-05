@@ -48,10 +48,18 @@ void ClientSession::process_command_line(const std::string& line) {
             break;
 
         // --- External commands routed through Cluster ---
-        case CommandType::Set:
-            cluster_.set(cmd.key, cmd.value, cmd.ttl_seconds.has_value() ? std::optional<std::chrono::seconds>(std::chrono::seconds(cmd.ttl_seconds.value())) : std::nullopt);
-            resp = Response::ok();
+        case CommandType::Set: {
+            auto ttl = cmd.ttl_seconds.has_value()
+                ? std::optional<std::chrono::seconds>(std::chrono::seconds(cmd.ttl_seconds.value()))
+                : std::nullopt;
+            bool success = cluster_.set(cmd.key, cmd.value, ttl);
+            if (success) {
+                resp = Response::ok();
+            } else {
+                resp = Response::error("WRITE_FAILED");
+            }
             break;
+        }
         case CommandType::Get: {
             auto val = cluster_.get(cmd.key);
             if (val.has_value()) {
@@ -67,7 +75,7 @@ void ClientSession::process_command_line(const std::string& line) {
             break;
         }
         case CommandType::Exists: {
-            bool exists = cluster_.local_cache().contains(cmd.key);
+            bool exists = cluster_.exists(cmd.key);
             resp = Response::integer(exists ? 1 : 0);
             break;
         }

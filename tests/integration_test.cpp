@@ -88,6 +88,125 @@ TEST_F(ThreeNodeClusterTest, CrossNodeRoutingSetAndGet) {
     EXPECT_EQ(get_res.value.value(), "distributed_data");
 }
 
+TEST_F(ThreeNodeClusterTest, ABAReplicationFlow) {
+    // Pick a key where Primary = nodeB, and Replica = nodeA
+    std::string target_key;
+    for (int i = 0; i < 10000; ++i) {
+        std::string k = "aba:key:" + std::to_string(i);
+        auto primary = clusters_[0]->locate(k);
+        if (primary.has_value() && primary->id == "nodeB") {
+            auto replicas = clusters_[0]->locate_replicas(k, 2);
+            bool has_nodeA_replica = false;
+            for (const auto& rep : replicas) {
+                if (rep.id == "nodeA") {
+                    has_nodeA_replica = true;
+                    break;
+                }
+            }
+            if (has_nodeA_replica) {
+                target_key = k;
+                break;
+            }
+        }
+    }
+    ASSERT_FALSE(target_key.empty());
+
+    // Connect client to nodeA (17001)
+    shardcache::network::Client clientA("127.0.0.1", 17001);
+    ASSERT_TRUE(clientA.connect());
+
+    auto start_time = std::chrono::steady_clock::now();
+
+    // SET test-key hello via Node A
+    auto set_res = clientA.set(target_key, "hello");
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_time);
+
+    EXPECT_TRUE(set_res.is_ok());
+    // Must complete fast without socket timeouts
+    EXPECT_LT(duration.count(), 1500);
+
+    // GET from A -> hello
+    auto getA = clientA.get(target_key);
+    ASSERT_TRUE(getA.is_ok());
+    ASSERT_TRUE(getA.value.has_value());
+    EXPECT_EQ(getA.value.value(), "hello");
+
+    // GET from B -> hello
+    shardcache::network::Client clientB("127.0.0.1", 17002);
+    ASSERT_TRUE(clientB.connect());
+    auto getB = clientB.get(target_key);
+    ASSERT_TRUE(getB.is_ok());
+    ASSERT_TRUE(getB.value.has_value());
+    EXPECT_EQ(getB.value.value(), "hello");
+
+    // GET from C -> hello
+    shardcache::network::Client clientC("127.0.0.1", 17003);
+    ASSERT_TRUE(clientC.connect());
+    auto getC = clientC.get(target_key);
+    ASSERT_TRUE(getC.is_ok());
+    ASSERT_TRUE(getC.value.has_value());
+    EXPECT_EQ(getC.value.value(), "hello");
+
+    // Verify Node A's local cache contains the replica data
+    EXPECT_TRUE(clusters_[0]->local_cache().contains(target_key));
+    EXPECT_EQ(clusters_[0]->local_cache().get(target_key).value_or(""), "hello");
+}
+
+TEST_F(ThreeNodeClusterTest, PrimaryDownReadFailoverToReplica) {
+    // 1. Pick a key where Primary = nodeB and Replica = nodeA
+    std::string key;
+    for (int i = 0; i < 10000; ++i) {
+        std::string k = "failover:key:" + std::to_string(i);
+        auto primary = clusters_[0]->locate(k);
+        if (primary.has_value() && primary->id == "nodeB") {
+            auto replicas = clusters_[0]->locate_replicas(k, 2);
+            bool has_nodeA_replica = false;
+            for (const auto& rep : replicas) {
+                if (rep.id == "nodeA") {
+                    has_nodeA_replica = true;
+                    break;
+                }
+            }
+            if (has_nodeA_replica) {
+                key = k;
+                break;
+            }
+        }
+    }
+    ASSERT_FALSE(key.empty());
+
+    // 2. SET key value
+    shardcache::network::Client clientA("127.0.0.1", 17001);
+    ASSERT_TRUE(clientA.connect());
+    EXPECT_TRUE(clientA.set(key, "resilient_data").is_ok());
+
+    // Confirm initial GET works
+    auto initial_get = clientA.get(key);
+    ASSERT_TRUE(initial_get.is_ok());
+    EXPECT_EQ(initial_get.value.value_or(""), "resilient_data");
+
+    // 3. Kill Node B (stop its io_context)
+    io_contexts_[1]->stop();
+
+    // Mark Node B unhealthy in cluster routing for remaining nodes A and C
+    clusters_[0]->set_node_health("nodeB", false);
+    clusters_[2]->set_node_health("nodeB", false);
+
+    // 4. Now GET through A -> value (reads local replica A)
+    auto getA = clientA.get(key);
+    ASSERT_TRUE(getA.is_ok());
+    ASSERT_TRUE(getA.value.has_value());
+    EXPECT_EQ(getA.value.value(), "resilient_data");
+
+    // 5. GET through C -> value (C forwards to healthy replica A instead of dead primary B)
+    shardcache::network::Client clientC("127.0.0.1", 17003);
+    ASSERT_TRUE(clientC.connect());
+    auto getC = clientC.get(key);
+    ASSERT_TRUE(getC.is_ok());
+    ASSERT_TRUE(getC.value.has_value());
+    EXPECT_EQ(getC.value.value(), "resilient_data");
+}
+
 TEST_F(ThreeNodeClusterTest, DeletePropagationAcrossCluster) {
     shardcache::network::Client clientA("127.0.0.1", 17001);
     ASSERT_TRUE(clientA.connect());
@@ -138,3 +257,20 @@ TEST_F(ThreeNodeClusterTest, StatusDistinguishability) {
     EXPECT_FALSE(res_conn_err.is_not_found());
     EXPECT_EQ(res_conn_err.status, shardcache::network::RequestStatus::ConnectionError);
 }
+
+TEST_F(ThreeNodeClusterTest, DistributedExistsVerification) {
+    shardcache::network::Client clientA("127.0.0.1", 17001);
+    ASSERT_TRUE(clientA.connect());
+    shardcache::network::Client clientC("127.0.0.1", 17003);
+    ASSERT_TRUE(clientC.connect());
+
+    // SET key on Node A
+    EXPECT_TRUE(clientA.set("exists_test_key", "val").is_ok());
+
+    // Verify Cluster::exists returns true from Node C across the cluster
+    EXPECT_TRUE(clusters_[2]->exists("exists_test_key"));
+
+    // Verify Cluster::exists returns false for non-existent key
+    EXPECT_FALSE(clusters_[2]->exists("non_existent_key_123"));
+}
+

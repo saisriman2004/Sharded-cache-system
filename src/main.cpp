@@ -4,6 +4,8 @@
 
 #include <iostream>
 #include <sstream>
+#include <thread>
+#include <vector>
 #include <boost/asio.hpp>
 #include <cstdlib>
 
@@ -64,8 +66,22 @@ int main(int argc, char* argv[]) {
         boost::asio::io_context io_context;
         shardcache::network::TCPServer server(io_context, port, cluster);
 
-        shardcache::Logger::instance().info("ShardCache Engine running. Listening on port " + std::to_string(port) + "...");
-        io_context.run();
+        shardcache::Logger::instance().info("ShardCache Engine running with 4 workers. Listening on port " + std::to_string(port) + "...");
+        constexpr std::size_t worker_count = 4;
+        std::vector<std::thread> workers;
+        workers.reserve(worker_count);
+
+        for (std::size_t i = 0; i < worker_count; ++i) {
+            workers.emplace_back([&io_context]() {
+                io_context.run();
+            });
+        }
+
+        for (auto& worker : workers) {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
     } catch (const std::exception& e) {
         shardcache::Logger::instance().error("Fatal server error: " + std::string(e.what()));
         return 1;
