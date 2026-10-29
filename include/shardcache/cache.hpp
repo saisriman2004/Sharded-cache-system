@@ -32,7 +32,10 @@ struct CacheMetrics {
 
 class Cache {
 public:
-    explicit Cache(std::size_t capacity = 10000);
+    explicit Cache(
+        std::size_t capacity = 10000,
+        std::chrono::milliseconds tombstone_ttl = std::chrono::seconds(60)
+    );
     ~Cache() = default;
 
     Cache(const Cache&) = delete;
@@ -50,8 +53,18 @@ public:
 
     bool remove(const std::string& key);
 
+    // Applies a replicated write (or delete, if v.tombstone) only if it
+    // supersedes the stored entry under last-writer-wins. Returns true if the
+    // store changed.
+    bool apply(const std::string& key, const VersionedValue& v);
+
+    // The stored entry with its version, including tombstones; nullopt if
+    // absent or expired.
+    std::optional<VersionedValue> get_versioned(const std::string& key) const;
+
     bool contains(const std::string& key);
 
+    // Number of live keys (tombstones excluded).
     std::size_t size() const;
 
     std::size_t capacity() const;
@@ -87,6 +100,8 @@ private:
     void erase_unsafe(std::list<Node>::iterator it);
 
     std::size_t capacity_;
+    std::chrono::milliseconds tombstone_ttl_;
+    std::size_t tombstones_{0};
     mutable std::shared_mutex mutex_;
 
     std::list<Node> lru_list_;

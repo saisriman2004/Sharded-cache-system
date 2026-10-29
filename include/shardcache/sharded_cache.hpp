@@ -34,6 +34,9 @@ public:
 
     bool remove(const std::string& key);
 
+    bool apply(const std::string& key, const VersionedValue& v);
+    std::optional<VersionedValue> get_versioned(const std::string& key) const;
+
     bool contains(const std::string& key);
 
     bool expire(const std::string& key, std::chrono::milliseconds ttl);

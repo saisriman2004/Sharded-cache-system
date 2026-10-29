@@ -2,10 +2,18 @@
 
 namespace shardcache {
 
-Cache::Cache(std::size_t capacity)
-    : capacity_(capacity) {}
+Cache::Cache(std::size_t capacity, std::chrono::milliseconds tombstone_ttl)
+    : capacity_(capacity), tombstone_ttl_(tombstone_ttl) {}
+
+namespace {
+// Live means visible to reads: present, not expired, not a tombstone.
+bool is_live(const CacheEntry& e, std::chrono::steady_clock::time_point now) {
+    return !e.tombstone && !e.is_expired(now);
+}
+} // namespace
 
 void Cache::erase_unsafe(std::list<Node>::iterator it) {
+    if (it->entry.tombstone) --tombstones_;
     entries_.erase(it->key);
     lru_list_.erase(it);
 }
@@ -31,8 +39,9 @@ void Cache::set(
 
     auto it = entries_.find(key);
     if (it != entries_.end()) {
-        it->second->entry.value = value;
-        it->second->entry.expires_at = expires_at;
+        auto& entry = it->second->entry;
+        if (entry.tombstone) --tombstones_;
+        entry = CacheEntry{value, expires_at};
         lru_list_.splice(lru_list_.begin(), lru_list_, it->second);
         return;
     }
@@ -53,7 +62,7 @@ std::optional<std::string> Cache::get(const std::string& key) {
         std::shared_lock lock(mutex_);
 
         auto it = entries_.find(key);
-        if (it == entries_.end() || it->second->entry.is_expired(now)) {
+        if (it == entries_.end() || !is_live(it->second->entry, now)) {
             // Expired entries are reclaimed by writers or the active TTL sweep,
             // which keeps the read path free of exclusive locking.
             metrics_.misses.fetch_add(1, std::memory_order_relaxed);
@@ -89,7 +98,7 @@ bool Cache::remove(const std::string& key) {
         return false;
     }
 
-    bool was_live = !it->second->entry.is_expired();
+    bool was_live = is_live(it->second->entry, std::chrono::steady_clock::now());
     erase_unsafe(it->second);
     metrics_.deletes.fetch_add(1, std::memory_order_relaxed);
     return was_live;
@@ -99,12 +108,64 @@ bool Cache::contains(const std::string& key) {
     std::shared_lock lock(mutex_);
 
     auto it = entries_.find(key);
-    return it != entries_.end() && !it->second->entry.is_expired();
+    return it != entries_.end() && is_live(it->second->entry, std::chrono::steady_clock::now());
+}
+
+bool Cache::apply(const std::string& key, const VersionedValue& v) {
+    const auto now = std::chrono::steady_clock::now();
+    std::optional<std::chrono::steady_clock::time_point> expires_at = std::nullopt;
+    if (v.tombstone) {
+        expires_at = now + tombstone_ttl_;
+    } else if (v.ttl.has_value()) {
+        expires_at = now + v.ttl.value();
+    }
+
+    std::unique_lock lock(mutex_);
+    auto it = entries_.find(key);
+    if (it != entries_.end()) {
+        auto& entry = it->second->entry;
+        // An expired entry carries no information worth protecting.
+        if (!entry.is_expired(now) && !supersedes(v.version, v.tombstone, v.value, entry)) {
+            return false;
+        }
+        if (entry.tombstone) --tombstones_;
+        if (v.tombstone) ++tombstones_;
+        entry = CacheEntry{v.value, expires_at, v.version, v.tombstone};
+        lru_list_.splice(lru_list_.begin(), lru_list_, it->second);
+        metrics_.sets.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
+    // A tombstone for an absent key is still stored: it may be ordering a
+    // delete ahead of an older write that has not arrived yet.
+    if (capacity_ > 0 && entries_.size() >= capacity_) {
+        evict_lru_unsafe();
+    }
+    lru_list_.emplace_front(key, CacheEntry{v.value, expires_at, v.version, v.tombstone});
+    entries_.emplace(key, lru_list_.begin());
+    if (v.tombstone) ++tombstones_;
+    metrics_.sets.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+std::optional<VersionedValue> Cache::get_versioned(const std::string& key) const {
+    const auto now = std::chrono::steady_clock::now();
+    std::shared_lock lock(mutex_);
+    auto it = entries_.find(key);
+    if (it == entries_.end() || it->second->entry.is_expired(now)) {
+        return std::nullopt;
+    }
+    const auto& e = it->second->entry;
+    VersionedValue out{e.value, e.version, e.tombstone, std::nullopt};
+    if (!e.tombstone && e.expires_at.has_value()) {
+        out.ttl = std::chrono::duration_cast<std::chrono::milliseconds>(e.expires_at.value() - now);
+    }
+    return out;
 }
 
 std::size_t Cache::size() const {
     std::shared_lock lock(mutex_);
-    return entries_.size();
+    return entries_.size() - tombstones_;
 }
 
 std::size_t Cache::capacity() const {
@@ -116,6 +177,7 @@ void Cache::clear() {
     std::unique_lock lock(mutex_);
     entries_.clear();
     lru_list_.clear();
+    tombstones_ = 0;
 }
 
 bool Cache::expire(const std::string& key, std::chrono::milliseconds ttl) {
@@ -125,6 +187,9 @@ bool Cache::expire(const std::string& key, std::chrono::milliseconds ttl) {
         return false;
     }
     auto now = std::chrono::steady_clock::now();
+    if (it->second->entry.tombstone) {
+        return false;
+    }
     if (it->second->entry.is_expired(now)) {
         erase_unsafe(it->second);
         metrics_.expirations.fetch_add(1, std::memory_order_relaxed);
@@ -141,7 +206,7 @@ std::optional<std::chrono::seconds> Cache::ttl(const std::string& key) const {
         return std::nullopt;
     }
     auto now = std::chrono::steady_clock::now();
-    if (it->second->entry.is_expired(now)) {
+    if (!is_live(it->second->entry, now)) {
         return std::nullopt;
     }
     if (!it->second->entry.expires_at.has_value()) {
@@ -155,7 +220,7 @@ int64_t Cache::pttl(const std::string& key) const {
     std::shared_lock lock(mutex_);
     auto it = entries_.find(key);
     auto now = std::chrono::steady_clock::now();
-    if (it == entries_.end() || it->second->entry.is_expired(now)) {
+    if (it == entries_.end() || !is_live(it->second->entry, now)) {
         return -2;
     }
     if (!it->second->entry.expires_at.has_value()) {
@@ -169,6 +234,7 @@ void Cache::purge_expired() {
     auto now = std::chrono::steady_clock::now();
     for (auto it = lru_list_.begin(); it != lru_list_.end(); ) {
         if (it->entry.is_expired(now)) {
+            if (it->entry.tombstone) --tombstones_;
             entries_.erase(it->key);
             it = lru_list_.erase(it);
             metrics_.expirations.fetch_add(1, std::memory_order_relaxed);

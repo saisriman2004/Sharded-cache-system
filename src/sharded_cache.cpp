@@ -54,6 +54,14 @@ bool ShardedCache::remove(const std::string& key) {
     return shards_[idx]->remove(key);
 }
 
+bool ShardedCache::apply(const std::string& key, const VersionedValue& v) {
+    return shards_[get_shard_index(key)]->apply(key, v);
+}
+
+std::optional<VersionedValue> ShardedCache::get_versioned(const std::string& key) const {
+    return shards_[get_shard_index(key)]->get_versioned(key);
+}
+
 bool ShardedCache::contains(const std::string& key) {
     std::size_t idx = get_shard_index(key);
     return shards_[idx]->contains(key);

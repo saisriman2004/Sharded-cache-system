@@ -90,6 +90,7 @@ if(BUILD_TESTING)
     tests/sharded_cache_test.cpp
     tests/protocol_test.cpp
     tests/network_test.cpp
+    tests/versioning_test.cpp
   )
 
   target_include_directories(cache_test PRIVATE
