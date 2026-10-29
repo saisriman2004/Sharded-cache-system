@@ -1,35 +1,67 @@
-version: '3.8'
+# Three-node ShardCache cluster with Prometheus and Grafana.
+#   docker compose up --build
+#   redis-cli -p 7001 SET hello world && redis-cli -p 7003 GET hello
+#   Grafana: http://localhost:3000 (dashboard "ShardCache")  Prometheus: http://localhost:9090
+# Nodes find each other by gossip: node-a starts alone, b and c join through it.
+
+x-node: &node
+  build: .
+  image: shardcache:latest
+  restart: unless-stopped
+  stop_grace_period: 20s   # time for a graceful leave (data handoff)
 
 services:
   node-a:
-    build: .
-    container_name: shardcache-node-a
-    ports:
-      - "7001:7001"
+    <<: *node
+    hostname: node-a
+    ports: ["7001:7001"]
     environment:
-      - NODE_ID=nodeA
-      - PORT=7001
-      - ADVERTISE_HOST=node-a
-      - CLUSTER_PEERS=nodeA:node-a:7001,nodeB:node-b:7002,nodeC:node-c:7003
+      NODE_ID: node-a
+      ADVERTISE_HOST: node-a
+    volumes: ["data-a:/data"]
 
   node-b:
-    build: .
-    container_name: shardcache-node-b
-    ports:
-      - "7002:7002"
+    <<: *node
+    hostname: node-b
+    ports: ["7002:7001"]
     environment:
-      - NODE_ID=nodeB
-      - PORT=7002
-      - ADVERTISE_HOST=node-b
-      - CLUSTER_PEERS=nodeA:node-a:7001,nodeB:node-b:7002,nodeC:node-c:7003
+      NODE_ID: node-b
+      ADVERTISE_HOST: node-b
+      SEEDS: node-a:7001
+    volumes: ["data-b:/data"]
+    depends_on: [node-a]
 
   node-c:
-    build: .
-    container_name: shardcache-node-c
-    ports:
-      - "7003:7003"
+    <<: *node
+    hostname: node-c
+    ports: ["7003:7001"]
     environment:
-      - NODE_ID=nodeC
-      - PORT=7003
-      - ADVERTISE_HOST=node-c
-      - CLUSTER_PEERS=nodeA:node-a:7001,nodeB:node-b:7002,nodeC:node-c:7003
+      NODE_ID: node-c
+      ADVERTISE_HOST: node-c
+      SEEDS: node-a:7001
+    volumes: ["data-c:/data"]
+    depends_on: [node-a]
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    ports: ["9090:9090"]
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on: [node-a, node-b, node-c]
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    ports: ["3000:3000"]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/shardcache.json
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus]
+
+volumes:
+  data-a:
+  data-b:
+  data-c:
