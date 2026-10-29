@@ -3,6 +3,8 @@
 
 #include "shardcache/consistent_hash.hpp"
 #include <thread>
+#include <condition_variable>
+#include <mutex>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -46,6 +48,8 @@ private:
     HealthCallback callback_;
     std::chrono::milliseconds interval_;
     std::atomic<bool> running_{false};
+    std::mutex wake_mutex_;
+    std::condition_variable wake_cv_;  // lets stop() interrupt the sleep
     std::thread worker_;
     mutable std::mutex nodes_mutex_;
     std::vector<CacheNode> nodes_;

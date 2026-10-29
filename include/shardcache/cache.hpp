@@ -55,8 +55,9 @@ public:
 
     // Applies a replicated write (or delete, if v.tombstone) only if it
     // supersedes the stored entry under last-writer-wins. Returns true if the
-    // store changed.
-    bool apply(const std::string& key, const VersionedValue& v);
+    // store changed. If `was_live` is given it receives whether the key was
+    // visible to reads before the call.
+    bool apply(const std::string& key, const VersionedValue& v, bool* was_live = nullptr);
 
     // The stored entry with its version, including tombstones; nullopt if
     // absent or expired.

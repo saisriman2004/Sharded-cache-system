@@ -9,6 +9,7 @@
 
 #include "network/request_result.hpp"
 #include "protocol/resp.hpp"
+#include "shardcache/cache_entry.hpp"
 
 namespace shardcache::network {
 
@@ -39,12 +40,12 @@ public:
     RequestResult<int64_t> pttl(const std::string& key);
     bool ping();
 
-    // Internal replication methods — these send REPL_* commands so that
-    // the receiving node writes directly to its local cache without
-    // routing through its own cluster hash ring.
-    RequestResult<void> replica_set(const std::string& key, const std::string& value, std::optional<uint64_t> ttl_ms = std::nullopt);
-    RequestResult<void> replica_delete(const std::string& key);
-    RequestResult<void> replica_expire(const std::string& key, uint64_t ttl_ms);
+    // Internal replication RPCs. The receiving node applies them to its
+    // local cache under last-writer-wins and never routes them further.
+    // Writes return whether the key was live on the replica beforehand.
+    RequestResult<bool> replica_write(const std::string& key, const VersionedValue& v);
+    // NotFound when the replica holds nothing (not even a tombstone).
+    RequestResult<VersionedValue> replica_get(const std::string& key);
 
 private:
     RequestResult<void> expect_ok(const std::vector<std::string>& args);

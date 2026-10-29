@@ -111,7 +111,7 @@ bool Cache::contains(const std::string& key) {
     return it != entries_.end() && is_live(it->second->entry, std::chrono::steady_clock::now());
 }
 
-bool Cache::apply(const std::string& key, const VersionedValue& v) {
+bool Cache::apply(const std::string& key, const VersionedValue& v, bool* was_live) {
     const auto now = std::chrono::steady_clock::now();
     std::optional<std::chrono::steady_clock::time_point> expires_at = std::nullopt;
     if (v.tombstone) {
@@ -122,6 +122,7 @@ bool Cache::apply(const std::string& key, const VersionedValue& v) {
 
     std::unique_lock lock(mutex_);
     auto it = entries_.find(key);
+    if (was_live) *was_live = it != entries_.end() && is_live(it->second->entry, now);
     if (it != entries_.end()) {
         auto& entry = it->second->entry;
         // An expired entry carries no information worth protecting.

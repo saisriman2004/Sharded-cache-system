@@ -17,7 +17,8 @@ public:
     explicit ShardedCache(
         std::size_t total_capacity = 10000,
         std::size_t shard_count = 16,
-        std::optional<std::chrono::milliseconds> active_ttl_interval = std::nullopt
+        std::optional<std::chrono::milliseconds> active_ttl_interval = std::nullopt,
+        std::chrono::milliseconds tombstone_ttl = std::chrono::seconds(60)
     );
     ~ShardedCache();
 
@@ -34,7 +35,7 @@ public:
 
     bool remove(const std::string& key);
 
-    bool apply(const std::string& key, const VersionedValue& v);
+    bool apply(const std::string& key, const VersionedValue& v, bool* was_live = nullptr);
     std::optional<VersionedValue> get_versioned(const std::string& key) const;
 
     bool contains(const std::string& key);

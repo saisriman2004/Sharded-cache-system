@@ -2,61 +2,80 @@
 #include "shardcache/logger.hpp"
 #include "network/peer_pool.hpp"
 
+#include <boost/asio/post.hpp>
+
 namespace shardcache {
 
-// Common initialization shared by both constructors.
+namespace {
+
+ClusterConfig legacy_config(std::size_t replication_factor, std::size_t cache_capacity) {
+    ClusterConfig config;
+    config.replication_factor = replication_factor;
+    config.cache_capacity = cache_capacity;
+    return config;
+}
+
+// Last-writer-wins comparison between two replica responses.
+bool newer(const VersionedValue& a, const VersionedValue& b) {
+    return supersedes(a.version, a.tombstone, a.value, CacheEntry{b.value, std::nullopt, b.version, b.tombstone});
+}
+
+bool same_version(const VersionedValue& a, const VersionedValue& b) {
+    return a.version == b.version && a.tombstone == b.tombstone && a.value == b.value;
+}
+
+} // namespace
+
 void Cluster::init_common() {
     health_checker_ = std::make_unique<HealthChecker>([this](const std::string& node_id, bool healthy) {
-        std::unique_lock lock(membership_mutex_);
-        node_health_[node_id] = healthy;
-        if (auto it = nodes_.find(node_id); !healthy && it != nodes_.end()) {
-            peer_pool_->drop(it->second.host, it->second.port);
-        }
-        if (!healthy) {
-            Logger::instance().warning("Node " + node_id + " marked unhealthy in cluster routing.");
-        } else {
-            Logger::instance().info("Node " + node_id + " marked healthy in cluster routing.");
-        }
-    });
+        set_node_health(node_id, healthy);
+    }, config_.health_check_interval);
 
     ring_.add_node(local_node_);
     nodes_[local_node_.id] = local_node_;
     node_health_[local_node_.id] = true;
 }
 
-Cluster::Cluster(const CacheNode& local_node, std::size_t replication_factor, std::size_t cache_capacity)
-    : local_node_(local_node),
-      replication_factor_(replication_factor),
-      peer_pool_(std::make_shared<network::PeerPool>()),
+Cluster::Cluster(const CacheNode& local_node, ClusterConfig config)
+    : config_(config),
+      local_node_(local_node),
+      peer_pool_(std::make_shared<network::PeerPool>(64, std::chrono::milliseconds(500), config.rpc_timeout)),
       ring_(100),
-      local_cache_(cache_capacity, 16),
-      replication_mgr_(local_node.id, ReplicationMode::Sync, peer_pool_) {
+      local_cache_(config.cache_capacity, 16, std::chrono::milliseconds(1000), config.tombstone_ttl),
+      rpc_pool_(config.rpc_threads) {
     init_common();
 }
 
+Cluster::Cluster(const CacheNode& local_node, std::size_t replication_factor, std::size_t cache_capacity)
+    : Cluster(local_node, legacy_config(replication_factor, cache_capacity)) {}
+
 Cluster::Cluster(const std::string& local_node_id, std::size_t replication_factor, std::size_t cache_capacity)
-    : local_node_{local_node_id, "127.0.0.1", 7001},
-      replication_factor_(replication_factor),
-      peer_pool_(std::make_shared<network::PeerPool>()),
-      ring_(100),
-      local_cache_(cache_capacity, 16),
-      replication_mgr_(local_node_id, ReplicationMode::Sync, peer_pool_) {
-    init_common();
-}
+    : Cluster(CacheNode{local_node_id, "127.0.0.1", 7001}, legacy_config(replication_factor, cache_capacity)) {}
 
 Cluster::~Cluster() {
     stop();
+    rpc_pool_.join();
 }
 
 void Cluster::start() {
     if (health_checker_) {
         health_checker_->start();
     }
+    if (!running_.exchange(true)) {
+        hint_thread_ = std::thread([this]() { hint_loop(); });
+    }
 }
 
 void Cluster::stop() {
     if (health_checker_) {
         health_checker_->stop();
+    }
+    if (running_.exchange(false)) {
+        {
+            std::lock_guard lock(hints_mutex_);
+        }
+        hints_cv_.notify_all();
+        if (hint_thread_.joinable()) hint_thread_.join();
     }
 }
 
@@ -87,21 +106,23 @@ std::size_t Cluster::node_count() const {
     return ring_.node_count();
 }
 
-std::optional<CacheNode> Cluster::locate(const std::string& key) const {
+std::vector<CacheNode> Cluster::preference_list(const std::string& key) const {
     std::shared_lock lock(membership_mutex_);
-    auto primary = ring_.locate(key);
-    if (!primary.has_value()) return std::nullopt;
-    auto it = node_health_.find(primary->id);
-    if (it != node_health_.end() && !it->second) {
-        auto replicas = ring_.locate_replicas(key, replication_factor_);
-        for (const auto& rep : replicas) {
-            auto rep_it = node_health_.find(rep.id);
-            if (rep_it == node_health_.end() || rep_it->second) {
-                return rep;
-            }
+    return ring_.locate_replicas(key, config_.replication_factor);
+}
+
+std::optional<CacheNode> Cluster::locate(const std::string& key) const {
+    // First healthy node of the preference list (the "primary" for routing views).
+    auto replicas = preference_list(key);
+    std::shared_lock lock(membership_mutex_);
+    for (const auto& node : replicas) {
+        auto it = node_health_.find(node.id);
+        if (it == node_health_.end() || it->second) {
+            return node;
         }
     }
-    return primary;
+    if (!replicas.empty()) return replicas.front();
+    return std::nullopt;
 }
 
 std::vector<CacheNode> Cluster::locate_replicas(const std::string& key, std::size_t count) const {
@@ -119,168 +140,259 @@ bool Cluster::is_node_healthy(const std::string& node_id) const {
 }
 
 void Cluster::set_node_health(const std::string& node_id, bool healthy) {
-    std::unique_lock lock(membership_mutex_);
-    node_health_[node_id] = healthy;
+    std::optional<CacheNode> node;
+    {
+        std::unique_lock lock(membership_mutex_);
+        node_health_[node_id] = healthy;
+        if (auto it = nodes_.find(node_id); it != nodes_.end()) {
+            node = it->second;
+        }
+    }
     if (!healthy) {
         Logger::instance().warning("Node " + node_id + " marked unhealthy in cluster routing.");
+        if (node) peer_pool_->drop(node->host, node->port);
     } else {
         Logger::instance().info("Node " + node_id + " marked healthy in cluster routing.");
+        hints_cv_.notify_all();
     }
 }
 
-bool Cluster::set(
-    const std::string& key,
-    const std::string& value,
-    std::optional<std::chrono::milliseconds> ttl
-) {
-    std::optional<CacheNode> primary;
-    std::vector<CacheNode> replicas;
+std::size_t Cluster::effective_quorum(std::size_t configured, std::size_t replicas) const {
+    std::size_t q = configured != 0 ? configured : config_.replication_factor / 2 + 1;
+    return std::max<std::size_t>(1, std::min(q, replicas));
+}
+
+bool Cluster::can_serve_locally(const std::string& key, bool is_write) const {
+    auto targets = preference_list(key);
+    bool local_is_replica = std::any_of(targets.begin(), targets.end(),
+                                        [&](const CacheNode& n) { return n.id == local_node_.id; });
+    if (!local_is_replica) return false;
+    if (is_write) return targets.size() == 1;
+    return effective_quorum(config_.read_quorum, targets.size()) == 1;
+}
+
+// ---------------------------------------------------------------------------
+// Writes
+
+bool Cluster::send_write(const CacheNode& node, const std::string& key, const VersionedValue& v, bool* was_live) {
+    auto client = peer_pool_->acquire(node.host, node.port);
+    if (!client) return false;
+    auto res = (*client)->replica_write(key, v);
+    if (!res.is_ok()) {
+        if (Logger::instance().enabled(LogLevel::DEBUG)) {
+            Logger::instance().debug("Replica write to " + node.id + " failed: " + res.message);
+        }
+        return false;
+    }
+    if (was_live) *was_live = res.value.value_or(false);
+    return true;
+}
+
+WriteResult Cluster::replicate(const std::string& key, const VersionedValue& v) {
+    const auto targets = preference_list(key);
+    if (targets.empty()) return {};
+    const std::size_t needed = effective_quorum(config_.write_quorum, targets.size());
+
+    struct State {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::size_t done{0};
+        std::size_t acks{0};
+        bool existed{false};
+    };
+    auto state = std::make_shared<State>();
+    auto record = [state](bool ok, bool live) {
+        std::lock_guard lock(state->mutex);
+        ++state->done;
+        if (ok) {
+            ++state->acks;
+            state->existed = state->existed || live;
+        }
+        state->cv.notify_all();
+    };
+
+    for (const auto& node : targets) {
+        if (node.id == local_node_.id) {
+            bool live = false;
+            local_cache_.apply(key, v, &live);
+            record(true, live);
+        } else if (!is_node_healthy(node.id)) {
+            add_hint(node, key, v);
+            record(false, false);
+        } else {
+            boost::asio::post(rpc_pool_, [this, node, key, v, record]() {
+                bool live = false;
+                bool ok = send_write(node, key, v, &live);
+                if (!ok) add_hint(node, key, v);
+                record(ok, live);
+            });
+        }
+    }
+
+    std::unique_lock lock(state->mutex);
+    state->cv.wait_for(lock, config_.rpc_timeout * 2, [&]() {
+        return state->acks >= needed || state->done == targets.size();
+    });
+    return WriteResult{state->acks >= needed, state->existed, state->acks};
+}
+
+WriteResult Cluster::put(const std::string& key, const std::string& value,
+                         std::optional<std::chrono::milliseconds> ttl) {
+    return replicate(key, VersionedValue{value, clock_.now(), false, ttl});
+}
+
+WriteResult Cluster::del(const std::string& key) {
+    return replicate(key, VersionedValue{"", clock_.now(), true, std::nullopt});
+}
+
+WriteResult Cluster::expire_key(const std::string& key, std::chrono::milliseconds ttl) {
+    auto current = read(key);
+    if (current.status == ReadStatus::Unavailable) return {};
+    if (current.status == ReadStatus::NotFound) return WriteResult{true, false, 0};
+    auto result = replicate(key, VersionedValue{current.value.value, clock_.now(), false, ttl});
+    result.existed = true;
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Reads
+
+ReadResult Cluster::read(const std::string& key) {
+    const auto targets = preference_list(key);
+    if (targets.empty()) return {};
+    const std::size_t needed = effective_quorum(config_.read_quorum, targets.size());
+
+    auto to_result = [](const std::optional<VersionedValue>& v) {
+        if (!v.has_value() || v->tombstone) return ReadResult{ReadStatus::NotFound, {}};
+        return ReadResult{ReadStatus::Found, v.value()};
+    };
+
+    // Fast path: this node's copy alone satisfies the read quorum.
+    if (needed == 1 && can_serve_locally(key, false)) {
+        return to_result(local_cache_.get_versioned(key));
+    }
+
+    struct State {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::size_t done{0};
+        std::size_t replies{0};
+        std::vector<std::optional<VersionedValue>> values;
+        std::vector<bool> replied;
+    };
+    auto state = std::make_shared<State>();
+    state->values.resize(targets.size());
+    state->replied.resize(targets.size(), false);
+
+    auto record = [state](std::size_t i, bool ok, std::optional<VersionedValue> value) {
+        std::lock_guard lock(state->mutex);
+        ++state->done;
+        if (ok) {
+            ++state->replies;
+            state->replied[i] = true;
+            state->values[i] = std::move(value);
+        }
+        state->cv.notify_all();
+    };
+
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        const auto& node = targets[i];
+        if (node.id == local_node_.id) {
+            record(i, true, local_cache_.get_versioned(key));
+        } else if (!is_node_healthy(node.id)) {
+            record(i, false, std::nullopt);
+        } else {
+            boost::asio::post(rpc_pool_, [this, i, node, key, record]() {
+                auto client = peer_pool_->acquire(node.host, node.port);
+                if (!client) {
+                    record(i, false, std::nullopt);
+                    return;
+                }
+                auto res = (*client)->replica_get(key);
+                if (res.is_ok()) {
+                    record(i, true, std::move(res.value));
+                } else {
+                    record(i, res.is_not_found(), std::nullopt);
+                }
+            });
+        }
+    }
+
+    std::vector<std::optional<VersionedValue>> values;
+    std::vector<bool> replied;
     {
-        std::shared_lock lock(membership_mutex_);
-        primary = ring_.locate(key);
-        if (!primary.has_value() || primary->id == local_node_.id) {
-            replicas = ring_.locate_replicas(key, replication_factor_);
+        std::unique_lock lock(state->mutex);
+        state->cv.wait_for(lock, config_.rpc_timeout * 2, [&]() {
+            return state->replies >= needed || state->done == targets.size();
+        });
+        if (state->replies < needed) return {};
+        values = state->values;
+        replied = state->replied;
+    }
+
+    std::optional<VersionedValue> winner;
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        if (replied[i] && values[i].has_value() && (!winner || newer(values[i].value(), winner.value()))) {
+            winner = values[i];
         }
     }
 
-    if (!primary.has_value() || primary->id == local_node_.id) {
-        local_cache_.set(key, value, ttl);
-        bool repl_ok = replication_mgr_.replicate_set(replicas, key, value, ttl);
-        if (replication_mgr_.mode() == ReplicationMode::Sync && !repl_ok) {
-            local_cache_.remove(key);
-            Logger::instance().warning("Sync replication failed for key '" + key + "', write rolled back");
-            return false;
+    if (winner.has_value()) {
+        clock_.observe(winner->version);
+        std::vector<CacheNode> stale;
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            if (replied[i] && (!values[i].has_value() || !same_version(values[i].value(), winner.value()))) {
+                stale.push_back(targets[i]);
+            }
         }
-        return true;
+        if (!stale.empty()) read_repair(key, winner.value(), stale);
     }
+    return to_result(winner);
+}
 
-    if (Logger::instance().enabled(LogLevel::DEBUG)) Logger::instance().debug("Forwarding SET key '" + key + "' to primary node " + primary->id + " (" + primary->host + ":" + std::to_string(primary->port) + ")");
-    auto client = peer_pool_->acquire(primary->host, primary->port);
-    if (client) {
-        std::optional<uint64_t> ttl_ms = std::nullopt;
-        if (ttl.has_value()) {
-            ttl_ms = static_cast<uint64_t>(ttl.value().count());
+void Cluster::read_repair(const std::string& key, const VersionedValue& winner, const std::vector<CacheNode>& stale) {
+    for (const auto& node : stale) {
+        if (node.id == local_node_.id) {
+            local_cache_.apply(key, winner);
+            continue;
         }
-        auto res = (*client)->set(key, value, ttl_ms);
-        return res.is_ok();
+        boost::asio::post(rpc_pool_, [this, node, key, winner]() {
+            send_write(node, key, winner, nullptr);
+        });
     }
+}
 
-    Logger::instance().warning("Primary node " + primary->id + " unreachable for SET key '" + key + "'");
-    return false;
+// ---------------------------------------------------------------------------
+// Convenience wrappers
+
+bool Cluster::set(const std::string& key, const std::string& value, std::optional<std::chrono::milliseconds> ttl) {
+    return put(key, value, ttl).ok;
 }
 
 std::optional<std::string> Cluster::get(const std::string& key) {
-    auto target = locate(key);
-    if (!target.has_value()) {
-        Logger::instance().warning("No healthy node available to serve GET for key '" + key + "'");
-        return std::nullopt;
-    }
-
-    if (target->id == local_node_.id) {
-        return local_cache_.get(key);
-    }
-
-    if (Logger::instance().enabled(LogLevel::DEBUG)) Logger::instance().debug("Forwarding GET key '" + key + "' to target node " + target->id + " (" + target->host + ":" + std::to_string(target->port) + ")");
-    auto client = peer_pool_->acquire(target->host, target->port);
-    if (client) {
-        auto res = (*client)->get(key);
-        if (res.is_ok()) {
-            return res.value;
-        }
-        if (res.is_not_found()) {
-            return std::nullopt;
-        }
-        Logger::instance().warning("Error retrieving key '" + key + "' from node " + target->id + ": " + res.message);
-        return std::nullopt;
-    }
-
-    Logger::instance().warning("Target node " + target->id + " unreachable for GET key '" + key + "'");
-    return std::nullopt;
+    auto r = read(key);
+    if (r.status != ReadStatus::Found) return std::nullopt;
+    return std::move(r.value.value);
 }
 
 bool Cluster::exists(const std::string& key) {
-    return get(key).has_value();
+    return read(key).status == ReadStatus::Found;
 }
 
 bool Cluster::remove(const std::string& key) {
-    std::optional<CacheNode> primary;
-    std::vector<CacheNode> replicas;
-    {
-        std::shared_lock lock(membership_mutex_);
-        primary = ring_.locate(key);
-        if (!primary.has_value() || primary->id == local_node_.id) {
-            replicas = ring_.locate_replicas(key, replication_factor_);
-        }
-    }
-
-    if (!primary.has_value() || primary->id == local_node_.id) {
-        bool repl_ok = replication_mgr_.replicate_delete(replicas, key);
-        bool removed = local_cache_.remove(key);
-        if (replication_mgr_.mode() == ReplicationMode::Sync && !repl_ok) {
-            Logger::instance().warning("Sync replication failed for DELETE key '" + key + "'");
-            return false;
-        }
-        return removed;
-    }
-
-    auto client = peer_pool_->acquire(primary->host, primary->port);
-    if (client) {
-        auto res = (*client)->remove(key);
-        return res.is_ok();
-    }
-
-    Logger::instance().warning("Primary node " + primary->id + " unreachable for DELETE key '" + key + "'");
-    return false;
+    auto r = del(key);
+    return r.ok && r.existed;
 }
 
 bool Cluster::expire(const std::string& key, std::chrono::milliseconds ttl) {
-    std::optional<CacheNode> primary;
-    std::vector<CacheNode> replicas;
-    {
-        std::shared_lock lock(membership_mutex_);
-        primary = ring_.locate(key);
-        if (!primary.has_value() || primary->id == local_node_.id) {
-            replicas = ring_.locate_replicas(key, replication_factor_);
-        }
-    }
-
-    if (!primary.has_value() || primary->id == local_node_.id) {
-        bool repl_ok = replication_mgr_.replicate_expire(replicas, key, ttl);
-        bool ok = local_cache_.expire(key, ttl);
-        if (replication_mgr_.mode() == ReplicationMode::Sync && !repl_ok) {
-            Logger::instance().warning("Sync replication failed for EXPIRE key '" + key + "'");
-            return false;
-        }
-        return ok;
-    }
-
-    auto client = peer_pool_->acquire(primary->host, primary->port);
-    if (client) {
-        auto res = (*client)->expire(key, static_cast<uint64_t>(ttl.count()));
-        return res.is_ok();
-    }
-
-    Logger::instance().warning("Primary node " + primary->id + " unreachable for EXPIRE key '" + key + "'");
-    return false;
+    auto r = expire_key(key, ttl);
+    return r.ok && r.existed;
 }
 
 int64_t Cluster::pttl(const std::string& key) {
-    auto target = locate(key);
-    if (!target.has_value() || target->id == local_node_.id) {
-        return local_cache_.pttl(key);
-    }
-
-    auto client = peer_pool_->acquire(target->host, target->port);
-    if (client) {
-        auto res = (*client)->pttl(key);
-        if (res.is_ok() && res.value.has_value()) {
-            return res.value.value();
-        }
-        return -2;
-    }
-
-    Logger::instance().warning("Node " + target->id + " unreachable for TTL key '" + key + "'");
-    return -2;
+    auto r = read(key);
+    if (r.status != ReadStatus::Found) return -2;
+    return r.value.ttl.has_value() ? r.value.ttl->count() : -1;
 }
 
 std::string Cluster::get_or_load(
@@ -289,6 +401,119 @@ std::string Cluster::get_or_load(
     std::optional<std::chrono::milliseconds> ttl
 ) {
     return local_cache_.get_or_load(key, loader, ttl);
+}
+
+// ---------------------------------------------------------------------------
+// Replica side
+
+bool Cluster::apply_replica_write(const std::string& key, const VersionedValue& v) {
+    clock_.observe(v.version);
+    bool was_live = false;
+    local_cache_.apply(key, v, &was_live);
+    return was_live;
+}
+
+std::optional<VersionedValue> Cluster::replica_read(const std::string& key) {
+    return local_cache_.get_versioned(key);
+}
+
+// ---------------------------------------------------------------------------
+// Hinted handoff
+
+void Cluster::add_hint(const CacheNode& node, const std::string& key, const VersionedValue& v) {
+    std::optional<std::chrono::steady_clock::time_point> deadline;
+    if (v.ttl.has_value()) deadline = std::chrono::steady_clock::now() + v.ttl.value();
+
+    std::lock_guard lock(hints_mutex_);
+    auto& queue = hints_[node.id];
+    if (queue.size() >= config_.max_hints_per_node) {
+        queue.pop_front();
+    }
+    queue.push_back(Hint{key, v, deadline});
+}
+
+std::size_t Cluster::pending_hints() const {
+    std::lock_guard lock(hints_mutex_);
+    std::size_t total = 0;
+    for (const auto& [_, queue] : hints_) total += queue.size();
+    return total;
+}
+
+void Cluster::replay_hints() {
+    constexpr std::size_t kBatch = 1024;
+
+    std::vector<std::string> node_ids;
+    {
+        std::lock_guard lock(hints_mutex_);
+        for (const auto& [id, queue] : hints_) {
+            if (!queue.empty()) node_ids.push_back(id);
+        }
+    }
+
+    for (const auto& id : node_ids) {
+        if (!is_node_healthy(id)) continue;
+        std::optional<CacheNode> node;
+        {
+            std::shared_lock lock(membership_mutex_);
+            if (auto it = nodes_.find(id); it != nodes_.end()) node = it->second;
+        }
+
+        std::deque<Hint> batch;
+        {
+            std::lock_guard lock(hints_mutex_);
+            auto& queue = hints_[id];
+            if (!node) {
+                queue.clear();  // node left the cluster
+                continue;
+            }
+            while (!queue.empty() && batch.size() < kBatch) {
+                batch.push_back(std::move(queue.front()));
+                queue.pop_front();
+            }
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        std::size_t delivered = 0;
+        while (!batch.empty()) {
+            Hint& hint = batch.front();
+            if (hint.deadline.has_value()) {
+                if (hint.deadline.value() <= now) {
+                    batch.pop_front();  // expired while queued
+                    continue;
+                }
+                hint.value.ttl = std::chrono::duration_cast<std::chrono::milliseconds>(hint.deadline.value() - now);
+            }
+            if (!send_write(node.value(), hint.key, hint.value, nullptr)) {
+                break;
+            }
+            batch.pop_front();
+            ++delivered;
+        }
+
+        if (!batch.empty()) {
+            // Peer failed mid-replay: put the rest back, oldest first.
+            std::lock_guard lock(hints_mutex_);
+            auto& queue = hints_[id];
+            while (!batch.empty()) {
+                queue.push_front(std::move(batch.back()));
+                batch.pop_back();
+            }
+        }
+        if (delivered > 0) {
+            Logger::instance().info("Hinted handoff delivered " + std::to_string(delivered) + " writes to " + id);
+        }
+    }
+}
+
+void Cluster::hint_loop() {
+    while (running_.load()) {
+        {
+            std::unique_lock lock(hints_mutex_);
+            hints_cv_.wait_for(lock, std::chrono::milliseconds(500), [this]() { return !running_.load(); });
+        }
+        if (!running_.load()) break;
+        replay_hints();
+    }
 }
 
 } // namespace shardcache

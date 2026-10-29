@@ -1,4 +1,5 @@
 #include "client.hpp"
+#include <algorithm>
 #include <array>
 #include <functional>
 
@@ -230,19 +231,45 @@ bool Client::ping() {
     return res.is_ok() && res.value->str == "PONG";
 }
 
-RequestResult<void> Client::replica_set(const std::string& key, const std::string& value, std::optional<uint64_t> ttl_ms) {
-    if (ttl_ms.has_value()) {
-        return expect_ok({"REPL_SET", key, value, "PX", std::to_string(ttl_ms.value())});
+RequestResult<bool> Client::replica_write(const std::string& key, const VersionedValue& v) {
+    std::vector<std::string> args;
+    if (v.tombstone) {
+        args = {"REPL_DEL", key, std::to_string(v.version)};
+    } else {
+        args = {"REPL_SET", key, v.value, std::to_string(v.version)};
+        if (v.ttl.has_value()) {
+            args.push_back("PX");
+            args.push_back(std::to_string(std::max<int64_t>(1, v.ttl->count())));
+        }
     }
-    return expect_ok({"REPL_SET", key, value});
+    auto res = command(args);
+    if (!res.is_ok()) return RequestResult<bool>::error(res.status, res.message);
+    if (res.value->type != protocol::RespValue::Type::Integer) {
+        return RequestResult<bool>::error(RequestStatus::ProtocolError, res.value->str);
+    }
+    return RequestResult<bool>::success(res.value->integer != 0);
 }
 
-RequestResult<void> Client::replica_delete(const std::string& key) {
-    return expect_ok({"REPL_DELETE", key});
-}
-
-RequestResult<void> Client::replica_expire(const std::string& key, uint64_t ttl_ms) {
-    return expect_ok({"REPL_PEXPIRE", key, std::to_string(ttl_ms)});
+RequestResult<VersionedValue> Client::replica_get(const std::string& key) {
+    auto res = command({"REPL_GET", key});
+    if (!res.is_ok()) return RequestResult<VersionedValue>::error(res.status, res.message);
+    const auto& r = res.value.value();
+    if (r.is_null()) return RequestResult<VersionedValue>::not_found();
+    // Reply: [value, version, tombstone (0/1), ttl_ms (-1 = none)]
+    if (r.type != protocol::RespValue::Type::Array || r.elements.size() != 4 ||
+        r.elements[1].type != protocol::RespValue::Type::Integer ||
+        r.elements[2].type != protocol::RespValue::Type::Integer ||
+        r.elements[3].type != protocol::RespValue::Type::Integer) {
+        return RequestResult<VersionedValue>::error(RequestStatus::ProtocolError, "Malformed REPL_GET reply");
+    }
+    VersionedValue v;
+    v.value = r.elements[0].str;
+    v.version = static_cast<uint64_t>(r.elements[1].integer);
+    v.tombstone = r.elements[2].integer != 0;
+    if (r.elements[3].integer >= 0) {
+        v.ttl = std::chrono::milliseconds(r.elements[3].integer);
+    }
+    return RequestResult<VersionedValue>::success(std::move(v));
 }
 
 } // namespace shardcache::network

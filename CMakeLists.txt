@@ -34,7 +34,6 @@ add_library(shardcache_lib
   src/ttl_manager.cpp
   src/consistent_hash.cpp
   src/cluster.cpp
-  src/replication.cpp
   src/health_checker.cpp
   src/single_flight.cpp
   src/sharded_cache.cpp
@@ -84,7 +83,6 @@ if(BUILD_TESTING)
     tests/ttl_test.cpp
     tests/consistent_hash_test.cpp
     tests/cluster_test.cpp
-    tests/replication_test.cpp
     tests/health_test.cpp
     tests/single_flight_test.cpp
     tests/sharded_cache_test.cpp

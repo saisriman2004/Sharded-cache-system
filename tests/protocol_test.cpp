@@ -62,29 +62,30 @@ TEST(ProtocolTest, ParseRedisCompatibleOptions) {
 }
 
 TEST(ProtocolTest, ParseInternalReplicationCommands) {
-    auto cmd_rset = Parser::parse("REPL_SET session:abc userdata TTL 120");
-    EXPECT_EQ(cmd_rset.type, CommandType::ReplSet);
-    EXPECT_EQ(cmd_rset.key, "session:abc");
-    EXPECT_EQ(cmd_rset.value, "userdata");
-    EXPECT_EQ(cmd_rset.ttl_ms.value_or(0), 120000u);
+    auto rset = Parser::parse("REPL_SET session:abc userdata 4242 PX 120000");
+    EXPECT_EQ(rset.type, CommandType::ReplSet);
+    EXPECT_EQ(rset.key, "session:abc");
+    EXPECT_EQ(rset.value, "userdata");
+    EXPECT_EQ(rset.version, 4242u);
+    EXPECT_EQ(rset.ttl_ms.value_or(0), 120000u);
 
-    auto cmd_rset_nottl = Parser::parse("REPL_SET mykey myval");
-    EXPECT_EQ(cmd_rset_nottl.type, CommandType::ReplSet);
-    EXPECT_FALSE(cmd_rset_nottl.ttl_ms.has_value());
+    auto rset_nottl = Parser::parse("REPL_SET mykey myval 7");
+    EXPECT_EQ(rset_nottl.type, CommandType::ReplSet);
+    EXPECT_FALSE(rset_nottl.ttl_ms.has_value());
 
-    auto cmd_rdel = Parser::parse("REPL_DELETE session:abc");
-    EXPECT_EQ(cmd_rdel.type, CommandType::ReplDelete);
-    EXPECT_EQ(cmd_rdel.key, "session:abc");
+    auto rdel = Parser::parse("REPL_DEL session:abc 99");
+    EXPECT_EQ(rdel.type, CommandType::ReplDelete);
+    EXPECT_EQ(rdel.version, 99u);
 
-    auto cmd_rexp = Parser::parse("REPL_EXPIRE session:abc 300");
-    EXPECT_EQ(cmd_rexp.type, CommandType::ReplExpire);
-    EXPECT_EQ(cmd_rexp.ttl_ms.value_or(0), 300000u);
+    auto rget = Parser::parse("REPL_GET session:abc");
+    EXPECT_EQ(rget.type, CommandType::ReplGet);
 
-    auto cmd_bad = Parser::parse("REPL_EXPIRE key notanumber");
-    EXPECT_EQ(cmd_bad.type, CommandType::Unknown);
+    // Internal writes must carry a numeric version.
+    EXPECT_EQ(Parser::parse("REPL_SET k v").type, CommandType::Unknown);
+    EXPECT_EQ(Parser::parse("REPL_DEL k notanumber").type, CommandType::Unknown);
 
-    EXPECT_NE(cmd_rset.type, CommandType::Set);
-    EXPECT_NE(cmd_rdel.type, CommandType::Delete);
+    EXPECT_NE(rset.type, CommandType::Set);
+    EXPECT_NE(rdel.type, CommandType::Delete);
 }
 
 TEST(RespTest, ParsesMultibulkRequest) {

@@ -1,6 +1,7 @@
 #include "command_handler.hpp"
 #include "protocol/resp.hpp"
 
+#include <algorithm>
 #include <chrono>
 
 namespace shardcache::network {
@@ -9,6 +10,9 @@ namespace resp = protocol::resp;
 using protocol::CommandType;
 
 namespace {
+
+constexpr const char* kWriteUnavailable = "ERR write quorum not reached";
+constexpr const char* kReadUnavailable = "ERR read quorum not reached";
 
 std::optional<std::chrono::milliseconds> to_ttl(const std::optional<uint64_t>& ttl_ms) {
     if (!ttl_ms.has_value()) return std::nullopt;
@@ -38,26 +42,22 @@ CommandHandler::~CommandHandler() {
 
 bool CommandHandler::runs_locally(const protocol::Command& cmd) const {
     switch (cmd.type) {
-        case CommandType::Set:
-        case CommandType::Delete:
-        case CommandType::Exists:
-        case CommandType::Expire:
         case CommandType::Get:
         case CommandType::Ttl:
         case CommandType::Pttl:
-            break;
+            return cluster_.can_serve_locally(cmd.key, false);
+        case CommandType::Exists:
+            return cmd.keys.size() == 1 && cluster_.can_serve_locally(cmd.key, false);
+        case CommandType::Set:
+            return cluster_.can_serve_locally(cmd.key, true);
+        case CommandType::Delete:
+            return cmd.keys.size() == 1 && cluster_.can_serve_locally(cmd.key, true);
+        case CommandType::Expire:
+            // Read-modify-write: local only if both halves are.
+            return cluster_.can_serve_locally(cmd.key, true) && cluster_.can_serve_locally(cmd.key, false);
         default:
             return true;
     }
-    if (cluster_.node_count() <= 1) return true;
-
-    // Reads of keys this node owns are served from the local cache.
-    bool read_only = cmd.type == CommandType::Get || cmd.type == CommandType::Ttl ||
-                     cmd.type == CommandType::Pttl ||
-                     (cmd.type == CommandType::Exists && cmd.keys.size() == 1);
-    if (!read_only) return false;
-    auto owner = cluster_.locate(cmd.key);
-    return owner.has_value() && owner->id == cluster_.local_node().id;
 }
 
 void CommandHandler::execute(const protocol::Command& cmd, std::string& out) {
@@ -105,27 +105,36 @@ void CommandHandler::execute(const protocol::Command& cmd, std::string& out) {
             resp::append_simple(out, "OK");
             return;
 
-        // --- External commands routed through Cluster ---
-        case CommandType::Set:
-            if (cluster_.set(cmd.key, cmd.value, to_ttl(cmd.ttl_ms))) {
+        // --- Coordinated commands: quorum reads and writes across replicas ---
+        case CommandType::Set: {
+            auto result = cluster_.put(cmd.key, cmd.value, to_ttl(cmd.ttl_ms));
+            if (result.ok) {
                 resp::append_simple(out, "OK");
             } else {
-                resp::append_error(out, "ERR write failed: replication not acknowledged");
+                resp::append_error(out, kWriteUnavailable);
             }
             return;
+        }
         case CommandType::Get: {
-            auto val = cluster_.get(cmd.key);
-            if (val.has_value()) {
-                resp::append_bulk(out, val.value());
-            } else {
+            auto r = cluster_.read(cmd.key);
+            if (r.status == ReadStatus::Found) {
+                resp::append_bulk(out, r.value.value);
+            } else if (r.status == ReadStatus::NotFound) {
                 resp::append_null(out);
+            } else {
+                resp::append_error(out, kReadUnavailable);
             }
             return;
         }
         case CommandType::Delete: {
             int64_t removed = 0;
             for (const auto& key : cmd.keys) {
-                removed += cluster_.remove(key) ? 1 : 0;
+                auto result = cluster_.del(key);
+                if (!result.ok) {
+                    resp::append_error(out, kWriteUnavailable);
+                    return;
+                }
+                removed += result.existed ? 1 : 0;
             }
             resp::append_integer(out, removed);
             return;
@@ -133,38 +142,65 @@ void CommandHandler::execute(const protocol::Command& cmd, std::string& out) {
         case CommandType::Exists: {
             int64_t found = 0;
             for (const auto& key : cmd.keys) {
-                found += cluster_.exists(key) ? 1 : 0;
+                auto r = cluster_.read(key);
+                if (r.status == ReadStatus::Unavailable) {
+                    resp::append_error(out, kReadUnavailable);
+                    return;
+                }
+                found += r.status == ReadStatus::Found ? 1 : 0;
             }
             resp::append_integer(out, found);
             return;
         }
-        case CommandType::Expire:
-            resp::append_integer(out, cluster_.expire(cmd.key, std::chrono::milliseconds(cmd.ttl_ms.value_or(0))) ? 1 : 0);
-            return;
-        case CommandType::Ttl: {
-            int64_t ms = cluster_.pttl(cmd.key);
-            // Round up like Redis so a key with 0 < ttl < 1s reports 1, not 0.
-            resp::append_integer(out, ms < 0 ? ms : (ms + 999) / 1000);
+        case CommandType::Expire: {
+            auto result = cluster_.expire_key(cmd.key, std::chrono::milliseconds(cmd.ttl_ms.value_or(0)));
+            if (!result.ok) {
+                resp::append_error(out, kWriteUnavailable);
+            } else {
+                resp::append_integer(out, result.existed ? 1 : 0);
+            }
             return;
         }
-        case CommandType::Pttl:
-            resp::append_integer(out, cluster_.pttl(cmd.key));
+        case CommandType::Ttl:
+        case CommandType::Pttl: {
+            auto r = cluster_.read(cmd.key);
+            if (r.status == ReadStatus::Unavailable) {
+                resp::append_error(out, kReadUnavailable);
+                return;
+            }
+            int64_t ms = -2;
+            if (r.status == ReadStatus::Found) {
+                ms = r.value.ttl.has_value() ? r.value.ttl->count() : -1;
+            }
+            // TTL rounds up like Redis so a key with 0 < ttl < 1s reports 1, not 0.
+            int64_t reply = (cmd.type == CommandType::Ttl && ms > 0) ? (ms + 999) / 1000 : ms;
+            resp::append_integer(out, reply);
             return;
+        }
 
-        // --- Internal replication commands: write DIRECTLY to local cache ---
-        // These must never be routed through Cluster again.
+        // --- Internal replication RPCs: applied to the local cache only ---
+        // These must never be routed through the cluster again.
         case CommandType::ReplSet:
-            cluster_.local_cache().set(cmd.key, cmd.value, to_ttl(cmd.ttl_ms));
-            resp::append_simple(out, "OK");
+            resp::append_integer(out, cluster_.apply_replica_write(
+                cmd.key, VersionedValue{cmd.value, cmd.version, false, to_ttl(cmd.ttl_ms)}) ? 1 : 0);
             return;
         case CommandType::ReplDelete:
-            cluster_.local_cache().remove(cmd.key);
-            resp::append_simple(out, "OK");
+            resp::append_integer(out, cluster_.apply_replica_write(
+                cmd.key, VersionedValue{"", cmd.version, true, std::nullopt}) ? 1 : 0);
             return;
-        case CommandType::ReplExpire:
-            cluster_.local_cache().expire(cmd.key, std::chrono::milliseconds(cmd.ttl_ms.value_or(0)));
-            resp::append_simple(out, "OK");
+        case CommandType::ReplGet: {
+            auto v = cluster_.replica_read(cmd.key);
+            if (!v.has_value()) {
+                resp::append_null(out);
+                return;
+            }
+            resp::append_array_header(out, 4);
+            resp::append_bulk(out, v->value);
+            resp::append_integer(out, static_cast<int64_t>(v->version));
+            resp::append_integer(out, v->tombstone ? 1 : 0);
+            resp::append_integer(out, v->ttl.has_value() ? std::max<int64_t>(1, v->ttl->count()) : -1);
             return;
+        }
 
         case CommandType::Unknown:
             resp::append_error(out, cmd.error.empty() ? "ERR unknown command" : cmd.error);

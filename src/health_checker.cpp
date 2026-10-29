@@ -39,7 +39,10 @@ void HealthChecker::start() {
     if (running_.exchange(true)) return;
     worker_ = std::thread([this]() {
         while (running_.load()) {
-            std::this_thread::sleep_for(interval_);
+            {
+                std::unique_lock lock(wake_mutex_);
+                wake_cv_.wait_for(lock, interval_, [this]() { return !running_.load(); });
+            }
             if (!running_.load()) break;
             run_check();
         }
@@ -48,6 +51,10 @@ void HealthChecker::start() {
 
 void HealthChecker::stop() {
     if (!running_.exchange(false)) return;
+    {
+        std::lock_guard lock(wake_mutex_);
+    }
+    wake_cv_.notify_all();
     if (worker_.joinable()) {
         worker_.join();
     }

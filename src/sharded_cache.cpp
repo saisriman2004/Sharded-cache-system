@@ -6,7 +6,8 @@ namespace shardcache {
 ShardedCache::ShardedCache(
     std::size_t total_capacity,
     std::size_t shard_count,
-    std::optional<std::chrono::milliseconds> active_ttl_interval
+    std::optional<std::chrono::milliseconds> active_ttl_interval,
+    std::chrono::milliseconds tombstone_ttl
 ) {
     if (shard_count == 0) shard_count = 1;
     std::size_t capacity_per_shard = total_capacity / shard_count;
@@ -14,7 +15,7 @@ ShardedCache::ShardedCache(
 
     shards_.reserve(shard_count);
     for (std::size_t i = 0; i < shard_count; ++i) {
-        shards_.push_back(std::make_unique<Cache>(capacity_per_shard));
+        shards_.push_back(std::make_unique<Cache>(capacity_per_shard, tombstone_ttl));
     }
 
     if (active_ttl_interval.has_value()) {
@@ -54,8 +55,8 @@ bool ShardedCache::remove(const std::string& key) {
     return shards_[idx]->remove(key);
 }
 
-bool ShardedCache::apply(const std::string& key, const VersionedValue& v) {
-    return shards_[get_shard_index(key)]->apply(key, v);
+bool ShardedCache::apply(const std::string& key, const VersionedValue& v, bool* was_live) {
+    return shards_[get_shard_index(key)]->apply(key, v, was_live);
 }
 
 std::optional<VersionedValue> ShardedCache::get_versioned(const std::string& key) const {

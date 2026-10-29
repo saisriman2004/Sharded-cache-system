@@ -99,34 +99,50 @@ Command Parser::parse(const std::vector<std::string>& args) {
         if (argc != 2) return wrong_arity(verb);
         cmd.type = CommandType::Get;
         cmd.key = args[1];
-    } else if (verb == "SET" || verb == "REPL_SET") {
+    } else if (verb == "SET") {
         if (argc < 3) return wrong_arity(verb);
-        cmd.type = verb == "SET" ? CommandType::Set : CommandType::ReplSet;
+        cmd.type = CommandType::Set;
         cmd.key = args[1];
         cmd.value = args[2];
         if (!parse_set_options(args, 3, cmd)) return invalid("ERR syntax error");
+    } else if (verb == "REPL_SET") {
+        if (argc < 4) return wrong_arity(verb);
+        auto version = parse_u64(args[3]);
+        if (!version.has_value()) return invalid("ERR invalid version");
+        cmd.type = CommandType::ReplSet;
+        cmd.key = args[1];
+        cmd.value = args[2];
+        cmd.version = version.value();
+        if (!parse_set_options(args, 4, cmd)) return invalid("ERR syntax error");
+    } else if (verb == "REPL_DEL") {
+        if (argc != 3) return wrong_arity(verb);
+        auto version = parse_u64(args[2]);
+        if (!version.has_value()) return invalid("ERR invalid version");
+        cmd.type = CommandType::ReplDelete;
+        cmd.key = args[1];
+        cmd.version = version.value();
+    } else if (verb == "REPL_GET") {
+        if (argc != 2) return wrong_arity(verb);
+        cmd.type = CommandType::ReplGet;
+        cmd.key = args[1];
     } else if (verb == "DEL" || verb == "DELETE" || verb == "EXISTS") {
         if (argc < 2) return wrong_arity(verb);
         cmd.type = verb == "EXISTS" ? CommandType::Exists : CommandType::Delete;
         cmd.key = args[1];
         cmd.keys.assign(args.begin() + 1, args.end());
-    } else if (verb == "EXPIRE" || verb == "PEXPIRE" || verb == "REPL_EXPIRE" || verb == "REPL_PEXPIRE") {
+    } else if (verb == "EXPIRE" || verb == "PEXPIRE") {
         if (argc != 3) return wrong_arity(verb);
-        cmd.type = verb.rfind("REPL_", 0) == 0 ? CommandType::ReplExpire : CommandType::Expire;
+        cmd.type = CommandType::Expire;
         cmd.key = args[1];
         auto n = parse_u64(args[2]);
         if (!n.has_value() || n.value() > kMaxTtlSeconds * 1000) {
             return invalid("ERR value is not an integer or out of range");
         }
-        bool millis = verb == "PEXPIRE" || verb == "REPL_PEXPIRE";
+        bool millis = verb == "PEXPIRE";
         cmd.ttl_ms = millis ? n.value() : n.value() * 1000;
     } else if (verb == "TTL" || verb == "PTTL") {
         if (argc != 2) return wrong_arity(verb);
         cmd.type = verb == "TTL" ? CommandType::Ttl : CommandType::Pttl;
-        cmd.key = args[1];
-    } else if (verb == "REPL_DELETE") {
-        if (argc != 2) return wrong_arity(verb);
-        cmd.type = CommandType::ReplDelete;
         cmd.key = args[1];
     } else {
         return invalid("ERR unknown command '" + args[0] + "'");

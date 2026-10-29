@@ -30,9 +30,9 @@ enum class CommandType {
     // Internal replication commands — these write directly to the
     // receiving node's local cache and must never be routed through
     // the cluster hash ring again.
-    ReplSet,
-    ReplDelete,
-    ReplExpire,
+    ReplSet,     // REPL_SET key value version [PX ms]
+    ReplDelete,  // REPL_DEL key version
+    ReplGet,     // REPL_GET key
     Unknown
 };
 
@@ -42,6 +42,7 @@ struct Command {
     std::vector<std::string> keys{}; // all key arguments (DEL / EXISTS)
     std::string value{};
     std::optional<uint64_t> ttl_ms{std::nullopt};
+    uint64_t version{0};             // internal replication commands only
     std::string error{};             // set when type == Unknown
 };
 
