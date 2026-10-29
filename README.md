@@ -1,119 +1,133 @@
 # ShardCache
 
-A high-performance distributed in-memory cache system written in C++20 featuring concurrent access, O(1) LRU eviction, active/lazy TTL expiration, Boost.Asio async networking, inter-node TCP request forwarding, synchronous/asynchronous replication, live TCP PING health checking with failover, SingleFlight stampede protection, 16-shard lock partitioning, multi-workload performance benchmarking, Docker Compose cluster orchestration, and GitHub Actions CI integration.
+A distributed, Redis-compatible in-memory cache in C++20, with leaderless
+quorum replication, gossip membership, live rebalancing and an optional
+linearizable mode. The consistency guarantees were verified with a
+Jepsen-style fault-injection harness and the Porcupine linearizability
+checker.
 
-```text
-                           CLIENTS
-                              │
-                         TCP Protocol
-                              │
-                              ▼
-                     ┌──────────────────┐
-                     │  ShardCache Node │
-                     └────────┬─────────┘
-                              │
-                      Consistent Hash Ring
-                              │
-            ┌─────────────────┼─────────────────┐
-            │                 │                 │
-            ▼                 ▼                 ▼
-       ┌─────────┐       ┌─────────┐       ┌─────────┐
-       │ Node A  │◄─────►│ Node B  │◄─────►│ Node C  │
-       ├─────────┤  TCP  ├─────────┤  TCP  ├─────────┤
-       │ Sharded │ Forward │ Sharded │ Forward │ Sharded │
-       │ Cache   │ & Repl  │ Cache   │ & Repl  │ Cache   │
-       │ LRU/TTL │         │ LRU/TTL │         │ LRU/TTL │
-       └─────────┘         └─────────┘         └─────────┘
-            ▲                 ▲                 ▲
-            └──────── Health Checks ────────────┘
-```
-
----
-
-## Key Features
-
-- **C++20 & Standard Concurrency**: Fine-grained `std::shared_mutex` for multi-reader / single-writer synchronization.
-- **O(1) Self-Implemented LRU Eviction**: Doubly-linked list (`std::list`) + hash map (`std::unordered_map`) storing list iterators.
-- **Lazy & Active TTL Expiration**: High-precision time point checks combined with background thread active purging (`TTLManager`).
-- **Inter-Node TCP Request Forwarding**: Automatic request routing based on FNV-1a consistent hash ring node ownership.
-- **Real Multi-Node Replication**: Synchronous/Asynchronous replication across backup replica cluster nodes over TCP.
-- **Live TCP Socket Health Checker**: Automatic node PING/PONG socket probes with 3-strike failure threshold for dynamic hash ring eviction and failover.
-- **SingleFlight Stampede Protection**: Coalesces duplicate concurrent cache miss requests for identical keys to eliminate backend thundering herd, supporting `get_or_load(key, loader)` with C++ exception propagation.
-- **Sharded Local Cache Partitioning**: Fine-grained lock partitioning across 16 independent shards delivering over **6.7x throughput improvement** under high thread contention.
-- **Safe Boost.Asio Networking & Text Protocol**: High-throughput async TCP server with owned response lifetime management, serialized session write queues, and support for `SET`, `GET`, `DELETE`, `EXISTS`, `EXPIRE`, `TTL`, `STATS`, and `PING`.
-- **Docker Compose Cluster Orchestration**: 3-node interconnected containerized cluster configuration (`nodeA`, `nodeB`, `nodeC`).
-- **GoogleTest & Benchmarks**: 27 unit/integration tests with 100% pass rate and comprehensive multi-workload benchmark suite.
-
----
-
-## Supported Protocol Commands
-
-| Command | Format | Response |
-| :--- | :--- | :--- |
-| `SET` | `SET key value [TTL seconds]` | `OK` |
-| `GET` | `GET key` | `VALUE value` or `NOT_FOUND` |
-| `DELETE` | `DELETE key` | `OK` or `NOT_FOUND` |
-| `EXISTS` | `EXISTS key` | `INT 1` or `INT 0` |
-| `EXPIRE` | `EXPIRE key seconds` | `OK` or `NOT_FOUND` |
-| `TTL` | `TTL key` | `INT seconds` or `INT -1` |
-| `STATS` | `STATS` | Metrics summary |
-| `PING` | `PING` | `PONG` |
-
----
-
-## Performance Benchmark Results
-
-Measured on macOS C++20 Apple Silicon (Pre-populated workload, 16 threads):
-
-### 1. Typical Cache Workload (80% GET / 20% SET)
-| Target Implementation | Threads | Throughput (Ops/sec) | $p50$ Latency | $p95$ Latency | $p99$ Latency |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Single Lock Cache** | 1 | 2,222,517 ops/sec | 0.2 µs | 0.3 µs | 0.4 µs |
-| **16-Shard Cache** | 1 | **1,934,147 ops/sec** | **0.3 µs** | **0.4 µs** | **0.5 µs** |
-| **Single Lock Cache** | 16 | 471,460 ops/sec | 1.9 µs | 164.2 µs | 294.0 µs |
-| **16-Shard Cache** | 16 | 🚀 **3,189,100 ops/sec** | **0.5 µs** | **28.0 µs** | **56.1 µs** |
-
-### 2. Read-Heavy Workload (95% GET / 5% SET)
-| Target Implementation | Threads | Throughput (Ops/sec) | $p50$ Latency | $p95$ Latency | $p99$ Latency |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Single Lock Cache** | 4 | 1,098,870 ops/sec | 1.2 µs | 14.8 µs | 26.8 µs |
-| **16-Shard Cache** | 4 | **4,702,854 ops/sec** | **0.4 µs** | **2.3 µs** | **6.6 µs** |
-| **Single Lock Cache** | 16 | 481,210 ops/sec | 2.0 µs | 158.3 µs | 287.4 µs |
-| **16-Shard Cache** | 16 | 🚀 **3,206,785 ops/sec** | **0.5 µs** | **28.0 µs** | **54.5 µs** |
-
----
-
-## Quick Start
-
-### 1. Build & Run Unit Tests
 ```bash
-mkdir -p build && cd build
-cmake ..
-cmake --build .
-./cache_test
+redis-cli -p 7001 SET user:42 '{"name":"Ada"}' EX 300   # any Redis client or tool works
+redis-cli -p 7003 GET user:42                           # any node serves any key
 ```
 
-### 2. Run Workload Benchmarks
+## Highlights
+
+- **Speaks RESP2.** Works with `redis-cli`, `redis-benchmark`,
+  `memtier_benchmark` and any Redis client library: `GET/SET [EX|PX]`,
+  `DEL`, `EXISTS`, `EXPIRE`, `TTL/PTTL`, `INFO`, `DBSIZE` and more, with
+  request pipelining.
+- **Throughput on par with Redis 8 and Memcached 1.6** in head-to-head
+  memtier runs on the same machine (about 210K ops/s unpipelined,
+  client-bound; 1–2.8M ops/s pipelined). [Benchmarks →](docs/benchmarks.md)
+- **Dynamo-style replication.** N replicas per key on a consistent-hash
+  ring, tunable R/W quorums, hybrid-logical-clock versions, read repair,
+  hinted handoff and tombstones. The default N=3, R=W=2 tolerates any one
+  node failing.
+- **Tested for consistency, not just asserted.** The chaos harness
+  partitions, pauses and crashes nodes under load. It found two real
+  anomalies in the quorum design (new-old inversion, and lost writes from
+  lagging clocks); `CONSISTENCY=linearizable` fixes both with the ABD
+  algorithm and passed every fault scenario. [Consistency report →](docs/consistency.md)
+- **Elastic.** Nodes join through any seed by gossip, data streams to new
+  owners automatically, and `SIGTERM` hands a node's data off before it
+  exits (883 keys rebalanced in 44 ms).
+- **Operable.** Prometheus `/metrics` and `/health`, a Grafana dashboard,
+  versioned snapshots for crash recovery, Docker Compose and a Kubernetes
+  StatefulSet.
+- **Engineered by measurement.** Each optimization was profiled and A/B
+  tested: lock-free routing (3.3× pipelined throughput), async pipelined
+  replication (+86% cluster throughput), shared-lock reads (1.8×), and a
+  cluster deadlock found and fixed. [History →](docs/benchmarks.md#optimization-history)
+
+## Architecture
+
+```
+ client ──RESP──▶ any node ──┬─ local shard (16-way sharded LRU, TTL)
+                             └─ coordinator ── N replicas on the hash ring
+                                  write: version (HLC) → all N, ack after W
+                                  read:  ask all N, newest of R wins, repair stale
+                                  miss:  hinted handoff when a replica returns
+ membership: gossip (join via seed, graceful leave) → rebalancing
+```
+
+How a request flows, placement, replication, membership and the trade-offs
+are covered in [docs/design.md](docs/design.md).
+
+## Quick start
+
+Requires CMake ≥ 3.20, a C++20 compiler and Boost (header-only Asio):
+`brew install boost` or `apt install libboost-dev`.
+
 ```bash
-./cache_benchmark
+cmake -S . -B build && cmake --build build -j
+ctest --test-dir build                 # 74 tests: unit, 3-node integration, membership, fuzz smoke
+
+./build/shardcache_app 7001            # single node on :7001, metrics on :9001
+redis-cli -p 7001 PING
 ```
 
-### 3. Run Standalone Node or Multi-Node Cluster
+**Local 3-node cluster** (B and C join A by gossip):
+
 ```bash
-# Standalone Server
-./build/shardcache_app 7001
-
-# Docker Multi-Node Cluster
-docker-compose up --build
+scripts/start_cluster.sh build
+redis-cli -p 7001 SET k v && redis-cli -p 7002 GET k
+redis-cli -p 7001 CLUSTER NODES
 ```
 
-### 4. Run Python Load Generator
+**Docker Compose** (3 nodes, Prometheus on :9090, Grafana on :3000):
+
 ```bash
-python3 scripts/load_test.py 7001 16 1000
+docker compose up --build
 ```
 
----
+**Kubernetes:** `kubectl apply -f deploy/k8s/shardcache.yaml` (3-pod
+StatefulSet; scale it with `kubectl scale`).
+
+## Configuration
+
+All settings are environment variables. `PORT` and `NODE_ID` can also be
+given as positional arguments.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PORT` / `NODE_ID` | `7001` / `nodeA` | Client and peer port; unique node name |
+| `ADVERTISE_HOST` | `127.0.0.1` | Address peers use to reach this node |
+| `SEEDS` | — | `host:port,...` of existing members to join through |
+| `CLUSTER_PEERS` | — | Static peer list `id:host:port,...` (alternative to seeds) |
+| `REPLICATION_FACTOR` | `3` | N: copies of each key |
+| `READ_QUORUM` / `WRITE_QUORUM` | majority of N | R and W |
+| `CONSISTENCY` | `quorum` | `quorum` or `linearizable` (ABD) |
+| `CACHE_CAPACITY` | `1000000` | Max entries per node (LRU eviction) |
+| `IO_THREADS` / `RPC_THREADS` | cores / `64` | Network threads / threads for commands waiting on peers |
+| `METRICS_PORT` | `PORT + 2000` | `/metrics` and `/health`; `0` disables |
+| `SNAPSHOT_PATH` / `SNAPSHOT_INTERVAL_SEC` | — / `60` | Enable snapshots and their period |
+| `LEAVE_ON_SHUTDOWN` | `1` | On SIGTERM, hand data off before exiting |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+
+## Testing
+
+| Layer | What runs |
+|---|---|
+| Unit (52) | Cache, LRU, TTL, versioning and LWW, HLC, RESP codec, parser, snapshots, ring balance |
+| Integration (21) | Real 3-node clusters over TCP: node down (detected or not), quorum loss, hinted handoff, read repair, convergence under concurrent writers, pipelining order, both consistency modes, join, rebalance, graceful leave |
+| Sanitizers | Every test under ASan, TSan and UBSan in CI |
+| Fuzzing | libFuzzer on the RESP parser with a round-trip property (60 s in CI; 2M local inputs) |
+| Chaos | `chaos/`: partitions, pauses, crash-restart and jitter, checked by Porcupine ([results](docs/consistency.md#results-on-the-final-implementation)) |
+
+## Repository layout
+
+```
+include/shardcache, src/   storage engine, cluster coordinator, membership, snapshots
+protocol/                  RESP2 codec and command parser
+network/                   sessions, servers, peer transports, metrics endpoint
+tests/, fuzz/              GoogleTest suites, fuzz target and corpus
+chaos/                     Go fault-injection harness (Porcupine)
+benchmarks/                memtier comparison, cluster and in-process benchmarks
+deploy/                    Prometheus, Grafana, Kubernetes
+docs/                      design, consistency report, benchmarks
+```
 
 ## License
 
-[MIT License](LICENSE)
+[MIT](LICENSE)
