@@ -73,7 +73,7 @@ Cluster::Cluster(const CacheNode& local_node, ClusterConfig config)
     : config_(config),
       local_node_(local_node),
       peer_pool_(std::make_shared<network::PeerPool>(64, std::chrono::milliseconds(500), config.rpc_timeout)),
-      ring_(100),
+      ring_(256),
       local_cache_(config.cache_capacity, 16, std::chrono::milliseconds(1000), config.tombstone_ttl),
       rpc_pool_(config.rpc_threads) {
     init_common();

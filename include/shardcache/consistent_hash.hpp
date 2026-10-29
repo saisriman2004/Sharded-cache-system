@@ -21,7 +21,7 @@ struct CacheNode {
 
 class ConsistentHashRing {
 public:
-    explicit ConsistentHashRing(std::size_t virtual_nodes_per_physical = 100);
+    explicit ConsistentHashRing(std::size_t virtual_nodes_per_physical = 256);
     ~ConsistentHashRing() = default;
 
     void add_node(const CacheNode& node);
