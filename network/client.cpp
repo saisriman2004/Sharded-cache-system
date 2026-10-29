@@ -231,29 +231,30 @@ bool Client::ping() {
     return res.is_ok() && res.value->str == "PONG";
 }
 
-RequestResult<bool> Client::replica_write(const std::string& key, const VersionedValue& v) {
-    std::vector<std::string> args;
+std::vector<std::string> replica_write_command(const std::string& key, const VersionedValue& v) {
     if (v.tombstone) {
-        args = {"REPL_DEL", key, std::to_string(v.version)};
-    } else {
-        args = {"REPL_SET", key, v.value, std::to_string(v.version)};
-        if (v.ttl.has_value()) {
-            args.push_back("PX");
-            args.push_back(std::to_string(std::max<int64_t>(1, v.ttl->count())));
-        }
+        return {"REPL_DEL", key, std::to_string(v.version)};
     }
-    auto res = command(args);
-    if (!res.is_ok()) return RequestResult<bool>::error(res.status, res.message);
-    if (res.value->type != protocol::RespValue::Type::Integer) {
-        return RequestResult<bool>::error(RequestStatus::ProtocolError, res.value->str);
+    std::vector<std::string> args{"REPL_SET", key, v.value, std::to_string(v.version)};
+    if (v.ttl.has_value()) {
+        args.push_back("PX");
+        args.push_back(std::to_string(std::max<int64_t>(1, v.ttl->count())));
     }
-    return RequestResult<bool>::success(res.value->integer != 0);
+    return args;
 }
 
-RequestResult<VersionedValue> Client::replica_get(const std::string& key) {
-    auto res = command({"REPL_GET", key});
-    if (!res.is_ok()) return RequestResult<VersionedValue>::error(res.status, res.message);
-    const auto& r = res.value.value();
+std::vector<std::string> replica_get_command(const std::string& key) {
+    return {"REPL_GET", key};
+}
+
+RequestResult<bool> decode_replica_write(const protocol::RespValue& reply) {
+    if (reply.type != protocol::RespValue::Type::Integer) {
+        return RequestResult<bool>::error(RequestStatus::ProtocolError, reply.str);
+    }
+    return RequestResult<bool>::success(reply.integer != 0);
+}
+
+RequestResult<VersionedValue> decode_replica_get(const protocol::RespValue& r) {
     if (r.is_null()) return RequestResult<VersionedValue>::not_found();
     // Reply: [value, version, tombstone (0/1), ttl_ms (-1 = none)]
     if (r.type != protocol::RespValue::Type::Array || r.elements.size() != 4 ||
@@ -270,6 +271,18 @@ RequestResult<VersionedValue> Client::replica_get(const std::string& key) {
         v.ttl = std::chrono::milliseconds(r.elements[3].integer);
     }
     return RequestResult<VersionedValue>::success(std::move(v));
+}
+
+RequestResult<bool> Client::replica_write(const std::string& key, const VersionedValue& v) {
+    auto res = command(replica_write_command(key, v));
+    if (!res.is_ok()) return RequestResult<bool>::error(res.status, res.message);
+    return decode_replica_write(res.value.value());
+}
+
+RequestResult<VersionedValue> Client::replica_get(const std::string& key) {
+    auto res = command(replica_get_command(key));
+    if (!res.is_ok()) return RequestResult<VersionedValue>::error(res.status, res.message);
+    return decode_replica_get(res.value.value());
 }
 
 } // namespace shardcache::network

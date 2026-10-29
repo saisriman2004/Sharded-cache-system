@@ -13,6 +13,15 @@
 
 namespace shardcache::network {
 
+// Wire format of the internal replication RPCs, shared by the blocking
+// Client and the asynchronous PeerChannel.
+std::vector<std::string> replica_write_command(const std::string& key, const VersionedValue& v);
+std::vector<std::string> replica_get_command(const std::string& key);
+// Decodes a reply to replica_write_command: whether the key was live before.
+RequestResult<bool> decode_replica_write(const protocol::RespValue& reply);
+// Decodes a reply to replica_get_command; NotFound when the replica holds nothing.
+RequestResult<VersionedValue> decode_replica_get(const protocol::RespValue& reply);
+
 // Blocking RESP client with connect and per-request I/O timeouts. Used for
 // inter-node RPCs, health checks and tests.
 class Client {

@@ -21,7 +21,7 @@
 
 namespace shardcache {
 
-namespace network { class PeerPool; }
+namespace network { class PeerPool; class PeerChannels; }
 
 enum class Consistency {
     // R/W quorums with last-writer-wins and asynchronous read repair. Fast,
@@ -49,6 +49,10 @@ struct ClusterConfig {
     std::chrono::milliseconds tombstone_ttl{std::chrono::seconds(60)};
     std::chrono::milliseconds health_check_interval{1000};
     std::size_t rpc_threads{32};
+    // Pipelined async connections per peer for quorum fan-out, and the
+    // threads that drive them.
+    std::size_t peer_channels{2};
+    std::size_t peer_io_threads{2};
     std::size_t max_hints_per_node{100000};
     Consistency consistency{Consistency::Quorum};
     std::chrono::milliseconds gossip_interval{500};
@@ -229,7 +233,8 @@ private:
     ClusterConfig config_;
     CacheNode local_node_;
     HybridClock clock_;
-    std::shared_ptr<network::PeerPool> peer_pool_;
+    std::shared_ptr<network::PeerPool> peer_pool_;          // blocking calls (hints, rebalance, gossip)
+    std::unique_ptr<network::PeerChannels> peer_channels_;  // quorum reads and writes
     ConsistentHashRing ring_;
     ShardedCache local_cache_;
     std::unique_ptr<HealthChecker> health_checker_;

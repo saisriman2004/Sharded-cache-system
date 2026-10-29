@@ -1,6 +1,7 @@
 #include "shardcache/cluster.hpp"
 #include "shardcache/logger.hpp"
 #include "network/peer_pool.hpp"
+#include "network/peer_channel.hpp"
 
 #include <boost/asio/post.hpp>
 
@@ -73,6 +74,7 @@ Cluster::Cluster(const CacheNode& local_node, ClusterConfig config)
     : config_(config),
       local_node_(local_node),
       peer_pool_(std::make_shared<network::PeerPool>(64, std::chrono::milliseconds(500), config.rpc_timeout)),
+      peer_channels_(std::make_unique<network::PeerChannels>(config.peer_io_threads, config.peer_channels, config.rpc_timeout)),
       ring_(256),
       local_cache_(config.cache_capacity, 16, std::chrono::milliseconds(1000), config.tombstone_ttl),
       rpc_pool_(config.rpc_threads) {
@@ -88,6 +90,7 @@ Cluster::Cluster(const std::string& local_node_id, std::size_t replication_facto
 Cluster::~Cluster() {
     stop();
     rpc_pool_.join();
+    peer_channels_.reset();  // fails outstanding calls while everything they touch is alive
 }
 
 void Cluster::start() {
@@ -429,7 +432,10 @@ void Cluster::set_node_health(const std::string& node_id, bool healthy) {
     }
     if (!healthy) {
         Logger::instance().warning("Node " + node_id + " marked unhealthy in cluster routing.");
-        if (node) peer_pool_->drop(node->host, node->port);
+        if (node) {
+            peer_pool_->drop(node->host, node->port);
+            peer_channels_->drop(node->host, node->port);
+        }
     } else {
         Logger::instance().info("Node " + node_id + " marked healthy in cluster routing.");
         hints_cv_.notify_all();
@@ -505,12 +511,18 @@ WriteResult Cluster::replicate(const std::string& key, const VersionedValue& v) 
             add_hint(node, key, v);
             record(false, false);
         } else {
-            boost::asio::post(rpc_pool_, [this, node, key, v, record]() {
-                bool live = false;
-                bool ok = send_write(node, key, v, &live);
-                if (!ok) add_hint(node, key, v);
-                record(ok, live);
-            });
+            peer_channels_->call(node.host, node.port, network::replica_write_command(key, v),
+                [this, node, key, v, record](network::RequestResult<protocol::RespValue> res) {
+                    bool ok = false;
+                    bool live = false;
+                    if (res.is_ok()) {
+                        auto decoded = network::decode_replica_write(res.value.value());
+                        ok = decoded.is_ok();
+                        live = decoded.value.value_or(false);
+                    }
+                    if (!ok) add_hint(node, key, v);
+                    record(ok, live);
+                });
         }
     }
 
@@ -605,19 +617,19 @@ Cluster::QuorumReplies Cluster::collect(const std::string& key) {
         } else if (!is_node_healthy(node.id)) {
             record(i, false, std::nullopt);
         } else {
-            boost::asio::post(rpc_pool_, [this, i, node, key, record]() {
-                auto client = peer_pool_->acquire(node.host, node.port);
-                if (!client) {
-                    record(i, false, std::nullopt);
-                    return;
-                }
-                auto res = (*client)->replica_get(key);
-                if (res.is_ok()) {
-                    record(i, true, std::move(res.value));
-                } else {
-                    record(i, res.is_not_found(), std::nullopt);
-                }
-            });
+            peer_channels_->call(node.host, node.port, network::replica_get_command(key),
+                [i, record](network::RequestResult<protocol::RespValue> res) {
+                    if (!res.is_ok()) {
+                        record(i, false, std::nullopt);
+                        return;
+                    }
+                    auto decoded = network::decode_replica_get(res.value.value());
+                    if (decoded.is_ok()) {
+                        record(i, true, std::move(decoded.value));
+                    } else {
+                        record(i, decoded.is_not_found(), std::nullopt);
+                    }
+                });
         }
     }
 
@@ -689,9 +701,8 @@ void Cluster::read_repair(const std::string& key, const VersionedValue& winner, 
             local_cache_.apply(key, winner);
             continue;
         }
-        boost::asio::post(rpc_pool_, [this, node, key, winner]() {
-            send_write(node, key, winner, nullptr);
-        });
+        peer_channels_->call(node.host, node.port, network::replica_write_command(key, winner),
+                             [](network::RequestResult<protocol::RespValue>) {});
     }
 }
 
