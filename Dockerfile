@@ -14,7 +14,7 @@ WORKDIR /app
 
 COPY . .
 
-RUN mkdir -p build && cd build && cmake .. && cmake --build .
+RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF && cmake --build build -j"$(nproc)"
 
 EXPOSE 7001 7002 7003
 

@@ -39,9 +39,11 @@ protected:
                 nodes_[i].port,
                 *clusters_[i]
             ));
+            // Capture the context pointer, not the vector: later push_backs may reallocate it.
+            boost::asio::io_context* ctx = io_contexts_[i].get();
             for (int t = 0; t < 4; ++t) {
-                io_threads_.emplace_back([this, i]() {
-                    io_contexts_[i]->run();
+                io_threads_.emplace_back([ctx]() {
+                    ctx->run();
                 });
             }
         }

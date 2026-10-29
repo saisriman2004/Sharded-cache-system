@@ -7,9 +7,24 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Default to an optimized build; benchmarks are meaningless without it.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+# Optional sanitizer builds: -DSHARDCACHE_SANITIZE=address|thread|undefined
+set(SHARDCACHE_SANITIZE "" CACHE STRING "Sanitizer to enable (address, thread, undefined)")
+if(SHARDCACHE_SANITIZE)
+  add_compile_options(-fsanitize=${SHARDCACHE_SANITIZE} -fno-omit-frame-pointer -g)
+  add_link_options(-fsanitize=${SHARDCACHE_SANITIZE})
+endif()
+
 # Compiler warnings
 add_compile_options(-Wall -Wextra -Wpedantic)
 
+if(POLICY CMP0167)
+  cmake_policy(SET CMP0167 NEW)
+endif()
 find_package(Boost REQUIRED)
 find_package(Threads REQUIRED)
 
@@ -54,6 +69,7 @@ if(BUILD_TESTING)
   FetchContent_Declare(
     googletest
     URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
   )
   set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(googletest)
