@@ -33,6 +33,9 @@ enum class CommandType {
     ReplSet,     // REPL_SET key value version [PX ms]
     ReplDelete,  // REPL_DEL key version
     ReplGet,     // REPL_GET key
+    // Cluster membership.
+    ClusterGossip,  // CLUSTER GOSSIP [id host port generation status]...
+    ClusterNodes,   // CLUSTER NODES
     Unknown
 };
 

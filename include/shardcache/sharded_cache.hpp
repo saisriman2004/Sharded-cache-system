@@ -38,6 +38,11 @@ public:
     bool apply(const std::string& key, const VersionedValue& v, bool* was_live = nullptr);
     std::optional<VersionedValue> get_versioned(const std::string& key) const;
 
+    // Visits a snapshot of every shard, one shard at a time, so no lock is
+    // held while `fn` runs.
+    void for_each_shard_snapshot(
+        const std::function<void(std::vector<std::pair<std::string, VersionedValue>>&)>& fn) const;
+
     bool contains(const std::string& key);
 
     bool expire(const std::string& key, std::chrono::milliseconds ttl);

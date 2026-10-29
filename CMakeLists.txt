@@ -104,6 +104,7 @@ if(BUILD_TESTING)
 
   add_executable(integration_test
     tests/integration_test.cpp
+    tests/membership_test.cpp
   )
   target_include_directories(integration_test PRIVATE
     ${googletest_SOURCE_DIR}/googletest/include

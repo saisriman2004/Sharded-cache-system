@@ -4,6 +4,8 @@
 
 #include <boost/asio/post.hpp>
 
+#include <random>
+
 namespace shardcache {
 
 namespace {
@@ -60,7 +62,11 @@ void Cluster::init_common() {
     ring_.add_node(local_node_);
     nodes_[local_node_.id] = local_node_;
     node_health_[local_node_.id] = true;
+    const auto boot_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+    members_[local_node_.id] = MemberInfo{local_node_, boot_ms, MemberStatus::Alive};
     publish_routing_locked();
+    placed_for_ = routing_;
 }
 
 Cluster::Cluster(const CacheNode& local_node, ClusterConfig config)
@@ -90,6 +96,8 @@ void Cluster::start() {
     }
     if (!running_.exchange(true)) {
         hint_thread_ = std::thread([this]() { hint_loop(); });
+        gossip_thread_ = std::thread([this]() { gossip_loop(); });
+        rebalance_thread_ = std::thread([this]() { rebalance_loop(); });
     }
 }
 
@@ -98,36 +106,280 @@ void Cluster::stop() {
         health_checker_->stop();
     }
     if (running_.exchange(false)) {
-        {
-            std::lock_guard lock(hints_mutex_);
-        }
+        // Lock/unlock each wake mutex so a thread between checking running_
+        // and waiting cannot miss the notification.
+        { std::lock_guard lock(hints_mutex_); }
+        { std::lock_guard lock(gossip_wake_mutex_); }
+        { std::lock_guard lock(rebalance_wake_mutex_); }
         hints_cv_.notify_all();
-        if (hint_thread_.joinable()) hint_thread_.join();
+        gossip_cv_.notify_all();
+        rebalance_cv_.notify_all();
+        for (auto* t : {&hint_thread_, &gossip_thread_, &rebalance_thread_}) {
+            if (t->joinable()) t->join();
+        }
     }
 }
 
 void Cluster::add_node(const CacheNode& node) {
-    {
-        std::unique_lock lock(membership_mutex_);
-        nodes_[node.id] = node;
-        ring_.add_node(node);
-        node_health_[node.id] = true;
-        publish_routing_locked();
-    }
-    if (node.id != local_node_.id) {
-        health_checker_->add_node(node);
-    }
+    // Statically configured peers enter at generation 0, so the node's own
+    // gossiped entry supersedes this one.
+    merge_gossip({MemberInfo{node, 0, MemberStatus::Alive}});
 }
 
 void Cluster::remove_node(const std::string& node_id) {
+    std::vector<CacheNode> added;
+    std::vector<std::string> removed;
     {
         std::unique_lock lock(membership_mutex_);
-        ring_.remove_node(node_id);
-        nodes_.erase(node_id);
-        node_health_.erase(node_id);
+        auto it = members_.find(node_id);
+        if (it == members_.end()) return;
+        MemberInfo gone = it->second;
+        gone.generation += 1;
+        gone.status = MemberStatus::Left;
+        apply_member_locked(gone, added, removed);
+    }
+    after_membership_change(added, removed);
+}
+
+// ---------------------------------------------------------------------------
+// Membership
+
+bool Cluster::apply_member_locked(const MemberInfo& m, std::vector<CacheNode>& added,
+                                  std::vector<std::string>& removed) {
+    auto it = members_.find(m.node.id);
+    if (it != members_.end() && it->second.generation >= m.generation) {
+        return false;  // we already know this or something newer
+    }
+    if (m.node.id == local_node_.id && it != members_.end()) {
+        // Only this node may change its own entry. A newer entry about us
+        // comes from a previous incarnation: outrank it instead of obeying it.
+        it->second.generation = m.generation + 1;
+        return false;
+    }
+    members_[m.node.id] = m;
+
+    const bool in_ring = nodes_.count(m.node.id) > 0;
+    if (m.status == MemberStatus::Alive && !in_ring) {
+        nodes_[m.node.id] = m.node;
+        ring_.add_node(m.node);
+        node_health_[m.node.id] = true;
+        added.push_back(m.node);
+        return true;
+    }
+    if (m.status == MemberStatus::Left && in_ring) {
+        ring_.remove_node(m.node.id);
+        nodes_.erase(m.node.id);
+        node_health_.erase(m.node.id);
+        removed.push_back(m.node.id);
+        return true;
+    }
+    return false;
+}
+
+void Cluster::after_membership_change(const std::vector<CacheNode>& added, const std::vector<std::string>& removed) {
+    for (const auto& node : added) {
+        if (node.id != local_node_.id) health_checker_->add_node(node);
+        Logger::instance().info("Node " + node.id + " (" + node.host + ":" + std::to_string(node.port) + ") joined the ring");
+    }
+    for (const auto& id : removed) {
+        health_checker_->remove_node(id);
+        Logger::instance().info("Node " + id + " left the ring");
+    }
+    if (!added.empty() || !removed.empty()) {
+        {
+            std::lock_guard lock(rebalance_wake_mutex_);
+            rebalance_requested_ = true;
+        }
+        rebalance_cv_.notify_all();
+    }
+}
+
+std::vector<MemberInfo> Cluster::merge_gossip(const std::vector<MemberInfo>& remote) {
+    std::vector<CacheNode> added;
+    std::vector<std::string> removed;
+    std::vector<MemberInfo> view;
+    {
+        std::unique_lock lock(membership_mutex_);
+        bool changed = false;
+        for (const auto& m : remote) {
+            changed = apply_member_locked(m, added, removed) || changed;
+        }
+        if (changed) publish_routing_locked();
+        view.reserve(members_.size());
+        for (const auto& [_, m] : members_) view.push_back(m);
+    }
+    after_membership_change(added, removed);
+    return view;
+}
+
+std::vector<MemberInfo> Cluster::members() const {
+    std::shared_lock lock(membership_mutex_);
+    std::vector<MemberInfo> view;
+    for (const auto& [_, m] : members_) view.push_back(m);
+    return view;
+}
+
+void Cluster::add_seed(const std::string& host, uint16_t port) {
+    std::unique_lock lock(membership_mutex_);
+    seeds_.emplace_back(host, port);
+}
+
+bool Cluster::exchange_gossip(const std::string& host, uint16_t port) {
+    auto view = members();
+    std::vector<std::string> args{"CLUSTER", "GOSSIP"};
+    for (const auto& m : view) {
+        args.push_back(m.node.id);
+        args.push_back(m.node.host);
+        args.push_back(std::to_string(m.node.port));
+        args.push_back(std::to_string(m.generation));
+        args.push_back(m.status == MemberStatus::Alive ? "alive" : "left");
+    }
+    auto client = peer_pool_->acquire(host, port);
+    if (!client) return false;
+    auto res = (*client)->command(args);
+    if (!res.is_ok() || res.value->type != protocol::RespValue::Type::Array) return false;
+
+    const auto& e = res.value->elements;
+    std::vector<MemberInfo> remote;
+    for (std::size_t i = 0; i + 4 < e.size(); i += 5) {
+        try {
+            remote.push_back(MemberInfo{
+                CacheNode{e[i].str, e[i + 1].str, static_cast<uint16_t>(std::stoi(e[i + 2].str))},
+                std::stoull(e[i + 3].str),
+                e[i + 4].str == "left" ? MemberStatus::Left : MemberStatus::Alive});
+        } catch (...) {
+            return false;
+        }
+    }
+    merge_gossip(remote);
+    return true;
+}
+
+void Cluster::gossip_once() {
+    // Push-pull with one random live peer; fall back to seeds until we know anyone.
+    std::vector<CacheNode> peers;
+    std::vector<std::pair<std::string, uint16_t>> seeds;
+    {
+        std::shared_lock lock(membership_mutex_);
+        for (const auto& [id, node] : nodes_) {
+            if (id == local_node_.id) continue;
+            auto h = node_health_.find(id);
+            if (h == node_health_.end() || h->second) peers.push_back(node);
+        }
+        seeds = seeds_;
+    }
+    thread_local std::mt19937 rng{std::random_device{}()};
+    if (!peers.empty()) {
+        const auto& peer = peers[std::uniform_int_distribution<std::size_t>(0, peers.size() - 1)(rng)];
+        exchange_gossip(peer.host, peer.port);
+    }
+    // Keep talking to seeds while small: a node that joined through a seed
+    // may not yet be known to the rest of the cluster.
+    if (!seeds.empty() && peers.size() < 2) {
+        const auto& seed = seeds[std::uniform_int_distribution<std::size_t>(0, seeds.size() - 1)(rng)];
+        exchange_gossip(seed.first, seed.second);
+    }
+}
+
+void Cluster::gossip_loop() {
+    while (running_.load()) {
+        gossip_once();
+        std::unique_lock lock(gossip_wake_mutex_);
+        gossip_cv_.wait_for(lock, config_.gossip_interval, [this]() { return !running_.load(); });
+    }
+}
+
+void Cluster::leave() {
+    std::vector<CacheNode> peers;
+    {
+        std::unique_lock lock(membership_mutex_);
+        auto& self = members_[local_node_.id];
+        self.generation += 1;
+        self.status = MemberStatus::Left;
+        for (const auto& [id, node] : nodes_) {
+            if (id != local_node_.id) peers.push_back(node);
+        }
+        ring_.remove_node(local_node_.id);
+        nodes_.erase(local_node_.id);
         publish_routing_locked();
     }
-    health_checker_->remove_node(node_id);
+    Logger::instance().info("Leaving the cluster: announcing to " + std::to_string(peers.size()) + " peers");
+    for (const auto& peer : peers) {
+        exchange_gossip(peer.host, peer.port);
+    }
+    rebalance_now();
+}
+
+// ---------------------------------------------------------------------------
+// Rebalancing
+
+void Cluster::rebalance_now() {
+    std::lock_guard serialize(rebalance_mutex_);
+    std::shared_ptr<const RoutingTable> target;
+    {
+        std::lock_guard lock(routing_mutex_);
+        target = routing_;
+    }
+    auto previous = placed_for_;
+    if (!target || previous == target) return;
+
+    const auto start = std::chrono::steady_clock::now();
+    uint64_t pushed = 0;
+    uint64_t dropped = 0;
+    local_cache_.for_each_shard_snapshot([&](std::vector<std::pair<std::string, VersionedValue>>& batch) {
+        for (auto& [key, value] : batch) {
+            std::vector<std::string> old_owners;
+            if (previous && !previous->empty()) {
+                for (uint16_t idx : previous->replicas(previous->point_for(key))) {
+                    old_owners.push_back(previous->node(idx).id);
+                }
+            }
+            bool still_owner = false;
+            bool handed_off = true;
+            for (const auto& node : target->preference_list(key)) {
+                if (node.id == local_node_.id) {
+                    still_owner = true;
+                    continue;
+                }
+                if (std::find(old_owners.begin(), old_owners.end(), node.id) != old_owners.end()) {
+                    continue;  // already held a copy under the old layout
+                }
+                if (send_write(node, key, value, nullptr)) {
+                    ++pushed;
+                } else {
+                    // Delivered later via hinted handoff; keep our copy meanwhile
+                    // so the data never exists only in a hint queue.
+                    add_hint(node, key, value);
+                    handed_off = false;
+                }
+            }
+            if (!still_owner && handed_off) {
+                local_cache_.remove(key);
+                ++dropped;
+            }
+        }
+    });
+    placed_for_ = target;
+    keys_moved_.fetch_add(pushed);
+    if (pushed > 0 || dropped > 0) {
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        Logger::instance().info("Rebalance: pushed " + std::to_string(pushed) + " keys to new owners, dropped " +
+                                std::to_string(dropped) + " no longer owned, in " + std::to_string(ms) + "ms");
+    }
+}
+
+void Cluster::rebalance_loop() {
+    while (running_.load()) {
+        {
+            std::unique_lock lock(rebalance_wake_mutex_);
+            rebalance_cv_.wait(lock, [this]() { return rebalance_requested_ || !running_.load(); });
+            if (!running_.load()) break;
+            rebalance_requested_ = false;
+        }
+        // Let a burst of membership changes settle into one pass.
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        rebalance_now();
+    }
 }
 
 std::size_t Cluster::node_count() const {

@@ -164,6 +164,21 @@ std::optional<VersionedValue> Cache::get_versioned(const std::string& key) const
     return out;
 }
 
+void Cache::snapshot(std::vector<std::pair<std::string, VersionedValue>>& out) const {
+    const auto now = std::chrono::steady_clock::now();
+    std::shared_lock lock(mutex_);
+    out.reserve(out.size() + entries_.size());
+    for (const auto& node : lru_list_) {
+        const auto& e = node.entry;
+        if (e.is_expired(now)) continue;
+        VersionedValue v{e.value, e.version, e.tombstone, std::nullopt};
+        if (!e.tombstone && e.expires_at.has_value()) {
+            v.ttl = std::chrono::duration_cast<std::chrono::milliseconds>(e.expires_at.value() - now);
+        }
+        out.emplace_back(node.key, std::move(v));
+    }
+}
+
 std::size_t Cache::size() const {
     std::shared_lock lock(mutex_);
     return entries_.size() - tombstones_;

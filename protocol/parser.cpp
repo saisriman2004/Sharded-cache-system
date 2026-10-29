@@ -91,6 +91,18 @@ Command Parser::parse(const std::vector<std::string>& args) {
         if (argc != 2) return wrong_arity(verb);
         cmd.type = CommandType::Select;
         cmd.value = args[1];
+    } else if (verb == "CLUSTER") {
+        if (argc < 2) return wrong_arity(verb);
+        const std::string sub = to_upper(args[1]);
+        if (sub == "GOSSIP") {
+            if ((argc - 2) % 5 != 0) return invalid("ERR malformed gossip payload");
+            cmd.type = CommandType::ClusterGossip;
+            cmd.keys.assign(args.begin() + 2, args.end());
+        } else if (sub == "NODES") {
+            cmd.type = CommandType::ClusterNodes;
+        } else {
+            return invalid("ERR unknown CLUSTER subcommand '" + args[1] + "'");
+        }
     } else if (verb == "CLIENT") {
         cmd.type = CommandType::Client;
     } else if (verb == "QUIT") {

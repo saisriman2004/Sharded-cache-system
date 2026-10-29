@@ -10,6 +10,7 @@
 #include <boost/asio.hpp>
 #include <cstdlib>
 #include <algorithm>
+#include <csignal>
 
 int main(int argc, char* argv[]) {
     std::string node_id = "nodeA";
@@ -95,6 +96,18 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    if (const char* env_seeds = std::getenv("SEEDS")) {
+        // Join an existing cluster through any of its members ("host:port,...").
+        std::istringstream iss(env_seeds);
+        std::string seed;
+        while (std::getline(iss, seed, ',')) {
+            auto colon = seed.rfind(':');
+            if (colon == std::string::npos) continue;
+            cluster.add_seed(seed.substr(0, colon), static_cast<uint16_t>(std::atoi(seed.c_str() + colon + 1)));
+            shardcache::Logger::instance().info("Joining via seed " + seed);
+        }
+    }
+
     cluster.start();
 
     try {
@@ -107,6 +120,20 @@ int main(int argc, char* argv[]) {
         shardcache::Logger::instance().info("ShardCache Engine running with " + std::to_string(io_threads) +
                                             " I/O threads and " + std::to_string(rpc_threads) +
                                             " RPC threads. Listening on port " + std::to_string(port) + "...");
+        // SIGTERM/SIGINT: leave gracefully (hand data to the remaining nodes)
+        // unless LEAVE_ON_SHUTDOWN=0, then stop serving.
+        boost::asio::signal_set signals(accept_context, SIGINT, SIGTERM);
+        signals.async_wait([&](const boost::system::error_code& ec, int /*signo*/) {
+            if (ec) return;
+            const char* leave = std::getenv("LEAVE_ON_SHUTDOWN");
+            if (!leave || std::string(leave) != "0") {
+                cluster.leave();
+            }
+            cluster.stop();
+            io_pool.stop();
+            accept_context.stop();
+        });
+
         io_pool.start();
         accept_context.run();
         io_pool.join();

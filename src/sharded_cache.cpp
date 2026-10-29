@@ -63,6 +63,16 @@ std::optional<VersionedValue> ShardedCache::get_versioned(const std::string& key
     return shards_[get_shard_index(key)]->get_versioned(key);
 }
 
+void ShardedCache::for_each_shard_snapshot(
+    const std::function<void(std::vector<std::pair<std::string, VersionedValue>>&)>& fn) const {
+    std::vector<std::pair<std::string, VersionedValue>> batch;
+    for (const auto& shard : shards_) {
+        batch.clear();
+        shard->snapshot(batch);
+        fn(batch);
+    }
+}
+
 bool ShardedCache::contains(const std::string& key) {
     std::size_t idx = get_shard_index(key);
     return shards_[idx]->contains(key);

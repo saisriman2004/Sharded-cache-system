@@ -11,6 +11,8 @@
 #include <mutex>
 #include <atomic>
 #include <chrono>
+#include <vector>
+#include <utility>
 
 namespace shardcache {
 
@@ -62,6 +64,10 @@ public:
     // The stored entry with its version, including tombstones; nullopt if
     // absent or expired.
     std::optional<VersionedValue> get_versioned(const std::string& key) const;
+
+    // Appends every unexpired entry (tombstones included) to `out`. Used to
+    // stream data to new owners when cluster membership changes.
+    void snapshot(std::vector<std::pair<std::string, VersionedValue>>& out) const;
 
     bool contains(const std::string& key);
 

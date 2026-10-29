@@ -202,6 +202,44 @@ void CommandHandler::execute(const protocol::Command& cmd, std::string& out) {
             return;
         }
 
+        // --- Membership ---
+        case CommandType::ClusterGossip: {
+            std::vector<MemberInfo> remote;
+            for (std::size_t i = 0; i + 4 < cmd.keys.size(); i += 5) {
+                try {
+                    remote.push_back(MemberInfo{
+                        CacheNode{cmd.keys[i], cmd.keys[i + 1], static_cast<uint16_t>(std::stoi(cmd.keys[i + 2]))},
+                        std::stoull(cmd.keys[i + 3]),
+                        cmd.keys[i + 4] == "left" ? MemberStatus::Left : MemberStatus::Alive});
+                } catch (...) {
+                    resp::append_error(out, "ERR malformed gossip entry");
+                    return;
+                }
+            }
+            auto view = cluster_.merge_gossip(remote);
+            resp::append_array_header(out, view.size() * 5);
+            for (const auto& m : view) {
+                resp::append_bulk(out, m.node.id);
+                resp::append_bulk(out, m.node.host);
+                resp::append_bulk(out, std::to_string(m.node.port));
+                resp::append_bulk(out, std::to_string(m.generation));
+                resp::append_bulk(out, m.status == MemberStatus::Alive ? "alive" : "left");
+            }
+            return;
+        }
+        case CommandType::ClusterNodes: {
+            std::string body;
+            for (const auto& m : cluster_.members()) {
+                bool alive = m.status == MemberStatus::Alive;
+                std::string health = !alive ? "-" : (cluster_.is_node_healthy(m.node.id) ? "healthy" : "unhealthy");
+                body += m.node.id + " " + m.node.host + ":" + std::to_string(m.node.port) + " gen=" +
+                        std::to_string(m.generation) + " " + (alive ? "alive" : "left") + " " + health +
+                        (m.node.id == cluster_.local_node().id ? " myself" : "") + "\n";
+            }
+            resp::append_bulk(out, body);
+            return;
+        }
+
         case CommandType::Unknown:
             resp::append_error(out, cmd.error.empty() ? "ERR unknown command" : cmd.error);
             return;

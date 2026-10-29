@@ -51,6 +51,19 @@ struct ClusterConfig {
     std::size_t rpc_threads{32};
     std::size_t max_hints_per_node{100000};
     Consistency consistency{Consistency::Quorum};
+    std::chrono::milliseconds gossip_interval{500};
+};
+
+enum class MemberStatus { Alive, Left };
+
+// One node's entry in the gossiped membership table. Each node owns its own
+// entry and bumps `generation` whenever it changes it (it starts at the
+// node's boot time in ms, so a restarted node supersedes its old self), so
+// merging is simply "higher generation wins".
+struct MemberInfo {
+    CacheNode node;
+    uint64_t generation{0};
+    MemberStatus status{MemberStatus::Alive};
 };
 
 enum class ReadStatus { Found, NotFound, Unavailable };
@@ -95,6 +108,23 @@ public:
 
     void add_node(const CacheNode& node);
     void remove_node(const std::string& node_id);
+
+    // --- Membership (gossip) and data placement ---
+    // Address of a node to gossip with until real peers are known (join).
+    void add_seed(const std::string& host, uint16_t port);
+    // Merges a peer's membership view into ours; returns our merged view.
+    std::vector<MemberInfo> merge_gossip(const std::vector<MemberInfo>& remote);
+    std::vector<MemberInfo> members() const;
+    // One push-pull gossip round with a random peer (normally periodic).
+    void gossip_once();
+    // Graceful departure: announce Left to every peer, then hand all local
+    // data to its new owners. The node keeps serving as a coordinator.
+    void leave();
+    // Streams keys whose preference list changed since the last placement to
+    // their new owners and drops keys this node no longer owns. Runs in the
+    // background after membership changes; public for tests.
+    void rebalance_now();
+    uint64_t keys_moved() const { return keys_moved_.load(); }
 
     // --- Coordinated operations ---
     ReadResult read(const std::string& key);
@@ -174,6 +204,12 @@ private:
     void read_repair(const std::string& key, const VersionedValue& winner, const std::vector<CacheNode>& stale);
     void add_hint(const CacheNode& node, const std::string& key, const VersionedValue& v);
     void hint_loop();
+    void gossip_loop();
+    void rebalance_loop();
+    // Applies one membership entry; returns true if the ring changed.
+    bool apply_member_locked(const MemberInfo& m, std::vector<CacheNode>& added, std::vector<std::string>& removed);
+    void after_membership_change(const std::vector<CacheNode>& added, const std::vector<std::string>& removed);
+    bool exchange_gossip(const std::string& host, uint16_t port);
     std::size_t effective_quorum(std::size_t configured, std::size_t replicas) const;
 
     ClusterConfig config_;
@@ -186,6 +222,21 @@ private:
     std::unordered_map<std::string, CacheNode> nodes_;
     std::unordered_map<std::string, bool> node_health_;
     mutable std::shared_mutex membership_mutex_;
+
+    std::unordered_map<std::string, MemberInfo> members_;
+    std::vector<std::pair<std::string, uint16_t>> seeds_;
+
+    std::mutex rebalance_mutex_;  // one rebalance at a time
+    std::mutex rebalance_wake_mutex_;
+    std::condition_variable rebalance_cv_;
+    bool rebalance_requested_{false};
+    std::shared_ptr<const RoutingTable> placed_for_;  // table the local data was last placed for
+    std::atomic<uint64_t> keys_moved_{0};
+
+    std::mutex gossip_wake_mutex_;
+    std::condition_variable gossip_cv_;
+    std::thread gossip_thread_;
+    std::thread rebalance_thread_;
 
     mutable std::mutex routing_mutex_;
     std::shared_ptr<const RoutingTable> routing_;
