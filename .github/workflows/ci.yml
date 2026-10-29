@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Install Dependencies
       run: |
@@ -22,10 +22,70 @@ jobs:
       run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
     - name: Build
-      run: cmake --build build --config Release
+      run: cmake --build build -j"$(nproc)"
 
     - name: Run Unit Tests
       run: ctest --test-dir build --output-on-failure
 
     - name: Run Performance Benchmarks
       run: ./build/cache_benchmark
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [ address, thread, undefined ]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake clang libboost-all-dev
+
+    - name: Configure CMake
+      run: >
+        cmake -B build
+        -DCMAKE_BUILD_TYPE=RelWithDebInfo
+        -DCMAKE_CXX_COMPILER=clang++
+        -DSHARDCACHE_SANITIZE=${{ matrix.sanitizer }}
+
+    - name: Build
+      run: cmake --build build -j"$(nproc)"
+
+    - name: Run Tests
+      env:
+        TSAN_OPTIONS: halt_on_error=1
+        ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+        UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      run: ctest --test-dir build --output-on-failure
+
+  fuzz:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake clang libboost-all-dev
+
+    - name: Build libFuzzer target
+      run: |
+        cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_COMPILER=clang++ -DSHARDCACHE_FUZZ=ON
+        cmake --build build -j"$(nproc)" --target resp_fuzzer
+
+    - name: Fuzz the RESP parser for 60s
+      run: |
+        mkdir -p corpus && cp fuzz/corpus/* corpus/
+        ./build/resp_fuzzer -max_total_time=60 -max_len=4096 corpus
+
+    - name: Upload crashing inputs
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: fuzz-crashes
+        path: crash-*

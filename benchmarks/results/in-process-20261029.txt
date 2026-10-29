@@ -1,0 +1,16 @@
+| Target Implementation     | Threads  | Ops/sec      | p50      | p95      | p99      |
+|---------------------------|----------|--------------|----------|----------|----------|
+--- Typical Cache Workload (80% GET / 20% SET) ---
+| Single Lock Cache         | 1        | 10653726     | 0.0      µs | 0.1      µs | 0.1      µs |
+| 16-Shard Cache            | 1        | 9866120      | 0.0      µs | 0.1      µs | 0.1      µs |
+| Single Lock Cache         | 4        | 1837477      | 0.1      µs | 11.3     µs | 29.1     µs |
+| 16-Shard Cache            | 4        | 9533709      | 0.1      µs | 1.0      µs | 6.8      µs |
+| Single Lock Cache         | 8        | 1054927      | 0.1      µs | 48.5     µs | 119.5    µs |
+| 16-Shard Cache            | 8        | 7466333      | 0.1      µs | 7.4      µs | 21.3     µs |
+| Single Lock Cache         | 16       | 1221004      | 0.1      µs | 66.3     µs | 236.1    µs |
+| 16-Shard Cache            | 16       | 5557080      | 0.1      µs | 21.2     µs | 55.7     µs |
+--- Read-Heavy Workload (95% GET / 5% SET) ---
+| Single Lock Cache         | 4        | 3152253      | 0.1      µs | 6.8      µs | 16.6     µs |
+| 16-Shard Cache            | 4        | 10278849     | 0.1      µs | 0.3      µs | 7.8      µs |
+| Single Lock Cache         | 16       | 1230136      | 0.1      µs | 85.3     µs | 212.8    µs |
+| 16-Shard Cache            | 16       | 7667701      | 0.1      µs | 14.1     µs | 44.0     µs |

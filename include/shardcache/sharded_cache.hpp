@@ -17,7 +17,8 @@ public:
     explicit ShardedCache(
         std::size_t total_capacity = 10000,
         std::size_t shard_count = 16,
-        std::optional<std::chrono::milliseconds> active_ttl_interval = std::nullopt
+        std::optional<std::chrono::milliseconds> active_ttl_interval = std::nullopt,
+        std::chrono::milliseconds tombstone_ttl = std::chrono::seconds(60)
     );
     ~ShardedCache();
 
@@ -27,22 +28,31 @@ public:
     void set(
         const std::string& key,
         const std::string& value,
-        std::optional<std::chrono::seconds> ttl = std::nullopt
+        std::optional<std::chrono::milliseconds> ttl = std::nullopt
     );
 
     std::optional<std::string> get(const std::string& key);
 
     bool remove(const std::string& key);
 
+    bool apply(const std::string& key, const VersionedValue& v, bool* was_live = nullptr);
+    std::optional<VersionedValue> get_versioned(const std::string& key) const;
+
+    // Visits a snapshot of every shard, one shard at a time, so no lock is
+    // held while `fn` runs.
+    void for_each_shard_snapshot(
+        const std::function<void(std::vector<std::pair<std::string, VersionedValue>>&)>& fn) const;
+
     bool contains(const std::string& key);
 
-    bool expire(const std::string& key, std::chrono::seconds ttl);
+    bool expire(const std::string& key, std::chrono::milliseconds ttl);
     std::optional<std::chrono::seconds> ttl(const std::string& key);
+    int64_t pttl(const std::string& key);
 
     std::string get_or_load(
         const std::string& key,
         std::function<std::string()> loader,
-        std::optional<std::chrono::seconds> ttl = std::nullopt
+        std::optional<std::chrono::milliseconds> ttl = std::nullopt
     );
 
     void purge_expired();
@@ -52,6 +62,11 @@ public:
     std::size_t shard_count() const { return shards_.size(); }
 
     void clear();
+
+    struct Totals {
+        uint64_t hits{0}, misses{0}, sets{0}, deletes{0}, evictions{0}, expirations{0};
+    };
+    Totals totals() const;
 
     uint64_t total_hits() const;
     uint64_t total_misses() const;

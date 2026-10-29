@@ -61,3 +61,19 @@ TEST(ConsistentHashTest, ReplicasLookup) {
     EXPECT_EQ(replicas.size(), 2);
     EXPECT_NE(replicas[0].id, replicas[1].id);
 }
+
+TEST(ConsistentHashTest, LoadIsBalancedAcrossNodes) {
+    shardcache::ConsistentHashRing ring;  // default vnode count
+    for (const char* id : {"nodeA", "nodeB", "nodeC"}) {
+        ring.add_node({id, "127.0.0.1", 7000});
+    }
+    std::map<std::string, int> owned;
+    constexpr int kKeys = 60000;
+    for (int i = 0; i < kKeys; ++i) {
+        owned[ring.locate("key:" + std::to_string(i))->id]++;
+    }
+    for (const auto& [id, count] : owned) {
+        // Within 10% of a perfect 1/3 split (measured: ~3% stddev).
+        EXPECT_NEAR(count, kKeys / 3, kKeys / 30) << id;
+    }
+}

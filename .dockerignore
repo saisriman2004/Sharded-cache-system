@@ -1,0 +1,6 @@
+.git
+build*
+chaos
+benchmarks/results
+deploy
+*.md

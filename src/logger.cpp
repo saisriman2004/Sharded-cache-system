@@ -11,13 +11,12 @@ Logger& Logger::instance() {
 }
 
 void Logger::set_level(LogLevel level) {
-    std::lock_guard lock(mutex_);
-    min_level_ = level;
+    min_level_.store(level, std::memory_order_relaxed);
 }
 
 void Logger::log(LogLevel level, const std::string& message) {
+    if (!enabled(level)) return;
     std::lock_guard lock(mutex_);
-    if (level < min_level_) return;
 
     auto now = std::chrono::system_clock::now();
     auto in_time_t = std::chrono::system_clock::to_time_t(now);

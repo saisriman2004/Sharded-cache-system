@@ -1,30 +1,26 @@
 #!/usr/bin/env bash
+# Starts a local 3-node cluster: node A alone, B and C join it by gossip.
+# Usage: scripts/start_cluster.sh [build_dir]   (Ctrl-C stops all nodes gracefully)
 set -e
 
-PEERS="nodeA:127.0.0.1:7001,nodeB:127.0.0.1:7002,nodeC:127.0.0.1:7003"
+BIN=${1:-build}/shardcache_app
+pids=()
 
-echo "Starting 3-node ShardCache cluster..."
-
-NODE_ID=nodeA PORT=7001 ADVERTISE_HOST=127.0.0.1 CLUSTER_PEERS="$PEERS" \
-  ./build/shardcache_app &
-PID1=$!
-
-NODE_ID=nodeB PORT=7002 ADVERTISE_HOST=127.0.0.1 CLUSTER_PEERS="$PEERS" \
-  ./build/shardcache_app &
-PID2=$!
-
-NODE_ID=nodeC PORT=7003 ADVERTISE_HOST=127.0.0.1 CLUSTER_PEERS="$PEERS" \
-  ./build/shardcache_app &
-PID3=$!
-
-echo "Node A running on port 7001 (PID $PID1)"
-echo "Node B running on port 7002 (PID $PID2)"
-echo "Node C running on port 7003 (PID $PID3)"
-
-cleanup() {
-    echo "Stopping cluster nodes..."
-    kill $PID1 $PID2 $PID3 2>/dev/null || true
+start() {
+  NODE_ID=$1 PORT=$2 ADVERTISE_HOST=127.0.0.1 SEEDS=$3 "$BIN" &
+  pids+=($!)
+  echo "Node $1 on port $2 (metrics on $(( $2 + 2000 ))), PID $!"
 }
 
-trap cleanup EXIT
+start nodeA 7001 ""
+sleep 0.5
+start nodeB 7002 127.0.0.1:7001
+start nodeC 7003 127.0.0.1:7001
+
+cleanup() {
+  echo "Stopping cluster nodes..."
+  kill -TERM "${pids[@]}" 2>/dev/null || true
+  wait
+}
+trap cleanup EXIT INT TERM
 wait

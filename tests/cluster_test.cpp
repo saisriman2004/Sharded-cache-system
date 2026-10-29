@@ -37,26 +37,29 @@ TEST(ClusterTest, NodeRoutingAndStorage) {
     EXPECT_FALSE(cluster.get(remote_key).has_value());
 }
 
-TEST(ClusterTest, SyncReplicationFailureRollback) {
-    // Cluster with replication factor 2
+TEST(ClusterTest, WriteFailsWithoutQuorum) {
+    // N = 2, W = 2: with the only peer offline no write can be acknowledged.
     shardcache::Cluster cluster("nodeA", 2, 1000);
     cluster.add_node({"nodeB", "127.0.0.1", 19995});
 
-    // Find a key where nodeA is primary
-    std::string local_key;
-    for (int i = 0; i < 1000; ++i) {
-        std::string k = "repl_key:" + std::to_string(i);
-        auto primary = cluster.locate(k);
-        if (primary.has_value() && primary->id == "nodeA") {
-            local_key = k;
-            break;
-        }
-    }
-    ASSERT_FALSE(local_key.empty());
+    auto result = cluster.put("any_key", "secret_value");
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.acks, 1u);  // only the local replica
 
-    // Sync write must fail because replica nodeB is offline
-    EXPECT_FALSE(cluster.set(local_key, "secret_value"));
+    // R = 2 cannot be met either: the read reports unavailability, not absence.
+    EXPECT_EQ(cluster.read("any_key").status, shardcache::ReadStatus::Unavailable);
 
-    // Key must be rolled back from local cache
-    EXPECT_FALSE(cluster.get(local_key).has_value());
+    // The missed write is queued for hinted handoff.
+    EXPECT_EQ(cluster.pending_hints(), 1u);
+}
+
+TEST(ClusterTest, SingleNodeServesLocally) {
+    shardcache::Cluster cluster("solo", 3, 1000);
+    EXPECT_TRUE(cluster.can_serve_locally("k", true));
+    EXPECT_TRUE(cluster.can_serve_locally("k", false));
+    EXPECT_TRUE(cluster.set("k", "v"));
+    EXPECT_EQ(cluster.get("k").value_or(""), "v");
+    EXPECT_TRUE(cluster.remove("k"));
+    EXPECT_FALSE(cluster.remove("k"));
+    EXPECT_FALSE(cluster.exists("k"));
 }

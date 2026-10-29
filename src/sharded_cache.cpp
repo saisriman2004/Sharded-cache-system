@@ -6,7 +6,8 @@ namespace shardcache {
 ShardedCache::ShardedCache(
     std::size_t total_capacity,
     std::size_t shard_count,
-    std::optional<std::chrono::milliseconds> active_ttl_interval
+    std::optional<std::chrono::milliseconds> active_ttl_interval,
+    std::chrono::milliseconds tombstone_ttl
 ) {
     if (shard_count == 0) shard_count = 1;
     std::size_t capacity_per_shard = total_capacity / shard_count;
@@ -14,7 +15,7 @@ ShardedCache::ShardedCache(
 
     shards_.reserve(shard_count);
     for (std::size_t i = 0; i < shard_count; ++i) {
-        shards_.push_back(std::make_unique<Cache>(capacity_per_shard));
+        shards_.push_back(std::make_unique<Cache>(capacity_per_shard, tombstone_ttl));
     }
 
     if (active_ttl_interval.has_value()) {
@@ -38,7 +39,7 @@ std::size_t ShardedCache::get_shard_index(const std::string& key) const {
 void ShardedCache::set(
     const std::string& key,
     const std::string& value,
-    std::optional<std::chrono::seconds> ttl
+    std::optional<std::chrono::milliseconds> ttl
 ) {
     std::size_t idx = get_shard_index(key);
     shards_[idx]->set(key, value, ttl);
@@ -54,12 +55,30 @@ bool ShardedCache::remove(const std::string& key) {
     return shards_[idx]->remove(key);
 }
 
+bool ShardedCache::apply(const std::string& key, const VersionedValue& v, bool* was_live) {
+    return shards_[get_shard_index(key)]->apply(key, v, was_live);
+}
+
+std::optional<VersionedValue> ShardedCache::get_versioned(const std::string& key) const {
+    return shards_[get_shard_index(key)]->get_versioned(key);
+}
+
+void ShardedCache::for_each_shard_snapshot(
+    const std::function<void(std::vector<std::pair<std::string, VersionedValue>>&)>& fn) const {
+    std::vector<std::pair<std::string, VersionedValue>> batch;
+    for (const auto& shard : shards_) {
+        batch.clear();
+        shard->snapshot(batch);
+        fn(batch);
+    }
+}
+
 bool ShardedCache::contains(const std::string& key) {
     std::size_t idx = get_shard_index(key);
     return shards_[idx]->contains(key);
 }
 
-bool ShardedCache::expire(const std::string& key, std::chrono::seconds ttl) {
+bool ShardedCache::expire(const std::string& key, std::chrono::milliseconds ttl) {
     std::size_t idx = get_shard_index(key);
     return shards_[idx]->expire(key, ttl);
 }
@@ -69,10 +88,15 @@ std::optional<std::chrono::seconds> ShardedCache::ttl(const std::string& key) {
     return shards_[idx]->ttl(key);
 }
 
+int64_t ShardedCache::pttl(const std::string& key) {
+    std::size_t idx = get_shard_index(key);
+    return shards_[idx]->pttl(key);
+}
+
 std::string ShardedCache::get_or_load(
     const std::string& key,
     std::function<std::string()> loader,
-    std::optional<std::chrono::seconds> ttl
+    std::optional<std::chrono::milliseconds> ttl
 ) {
     auto val = get(key);
     if (val.has_value()) {
@@ -116,6 +140,20 @@ void ShardedCache::clear() {
     for (auto& shard : shards_) {
         shard->clear();
     }
+}
+
+ShardedCache::Totals ShardedCache::totals() const {
+    Totals t;
+    for (const auto& shard : shards_) {
+        const auto& m = shard->metrics();
+        t.hits += m.hits.load(std::memory_order_relaxed);
+        t.misses += m.misses.load(std::memory_order_relaxed);
+        t.sets += m.sets.load(std::memory_order_relaxed);
+        t.deletes += m.deletes.load(std::memory_order_relaxed);
+        t.evictions += m.evictions.load(std::memory_order_relaxed);
+        t.expirations += m.expirations.load(std::memory_order_relaxed);
+    }
+    return t;
 }
 
 uint64_t ShardedCache::total_hits() const {

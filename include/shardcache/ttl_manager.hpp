@@ -2,6 +2,8 @@
 #define SHARDCACHE_TTL_MANAGER_HPP
 
 #include <thread>
+#include <condition_variable>
+#include <mutex>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -22,6 +24,8 @@ private:
     PurgeCallback callback_;
     std::chrono::milliseconds interval_;
     std::atomic<bool> running_{false};
+    std::mutex wake_mutex_;
+    std::condition_variable wake_cv_;  // lets stop() interrupt the sleep
     std::thread worker_thread_;
 };
 
