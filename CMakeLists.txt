@@ -123,6 +123,22 @@ if(BUILD_TESTING)
   )
   target_link_libraries(cache_benchmark PRIVATE shardcache_lib)
 
+  # Fuzzing the untrusted-input path. With clang + libFuzzer:
+  #   -DSHARDCACHE_FUZZ=ON -DCMAKE_CXX_COMPILER=clang++  ->  ./resp_fuzzer fuzz/corpus
+  # Everywhere else a standalone mutation driver is built instead.
+  option(SHARDCACHE_FUZZ "Build the libFuzzer target (requires clang with libFuzzer)" OFF)
+  if(SHARDCACHE_FUZZ)
+    add_executable(resp_fuzzer fuzz/resp_fuzzer.cpp)
+    target_compile_options(resp_fuzzer PRIVATE -fsanitize=fuzzer,address,undefined)
+    target_link_options(resp_fuzzer PRIVATE -fsanitize=fuzzer,address,undefined)
+    target_link_libraries(resp_fuzzer PRIVATE shardcache_lib)
+  else()
+    add_executable(resp_fuzzer_standalone fuzz/resp_fuzzer.cpp fuzz/standalone_driver.cpp)
+    target_link_libraries(resp_fuzzer_standalone PRIVATE shardcache_lib)
+    add_test(NAME resp_fuzz_smoke
+             COMMAND resp_fuzzer_standalone ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus 20000)
+  endif()
+
   include(GoogleTest)
   gtest_discover_tests(cache_test)
   gtest_discover_tests(integration_test)

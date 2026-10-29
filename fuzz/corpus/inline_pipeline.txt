@@ -1,0 +1,3 @@
+SET k v EX 10
+GET k
+DEL k a b
