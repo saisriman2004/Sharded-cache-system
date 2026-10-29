@@ -26,12 +26,12 @@ public:
     ~TCPServer() = default;
 
     void start_accept();
-    CommandHandler& handler() { return handler_; }
+    CommandHandler& handler() { return *handler_; }
 
 private:
     boost::asio::ip::tcp::acceptor acceptor_;
     IoContextPool* connection_pool_;
-    CommandHandler handler_;
+    std::shared_ptr<CommandHandler> handler_;
 };
 
 } // namespace shardcache::network

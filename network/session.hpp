@@ -16,8 +16,10 @@ namespace shardcache::network {
 // pipelined requests are answered with a single write.
 class ClientSession : public std::enable_shared_from_this<ClientSession> {
 public:
-    ClientSession(boost::asio::ip::tcp::socket socket, CommandHandler& handler);
-    ~ClientSession() { handler_.connection_closed(); }
+    // Sessions share ownership of the handler: pending sessions can be
+    // destroyed after the server, when their io_context shuts down.
+    ClientSession(boost::asio::ip::tcp::socket socket, std::shared_ptr<CommandHandler> handler);
+    ~ClientSession() { handler_->connection_closed(); }
 
     void start();
 
@@ -29,7 +31,7 @@ private:
     void close();
 
     boost::asio::ip::tcp::socket socket_;
-    CommandHandler& handler_;
+    std::shared_ptr<CommandHandler> handler_;
     std::array<char, 16 * 1024> read_chunk_{};
     std::string input_;
     std::string output_;

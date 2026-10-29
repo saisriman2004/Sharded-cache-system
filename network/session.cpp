@@ -10,9 +10,9 @@ namespace {
 constexpr std::size_t kMaxPendingOutput = 1024 * 1024;
 } // namespace
 
-ClientSession::ClientSession(boost::asio::ip::tcp::socket socket, CommandHandler& handler)
-    : socket_(std::move(socket)), handler_(handler) {
-    handler_.connection_opened();
+ClientSession::ClientSession(boost::asio::ip::tcp::socket socket, std::shared_ptr<CommandHandler> handler)
+    : socket_(std::move(socket)), handler_(std::move(handler)) {
+    handler_->connection_opened();
     boost::system::error_code ec;
     socket_.set_option(boost::asio::ip::tcp::no_delay(true), ec);
 }
@@ -60,7 +60,7 @@ void ClientSession::process_input() {
         }
 
         auto cmd = protocol::Parser::parse(args);
-        if (!handler_.runs_locally(cmd)) {
+        if (!handler_->runs_locally(cmd)) {
             // Hand off to the RPC executor; pipelined commands behind this
             // one stay buffered so replies keep their order.
             awaiting_rpc_ = true;
@@ -68,7 +68,7 @@ void ClientSession::process_input() {
             run_remote(std::move(cmd));
             return;
         }
-        handler_.execute(cmd, output_);
+        handler_->execute(cmd, output_);
         if (cmd.type == protocol::CommandType::Quit) {
             closing_ = true;
         }
@@ -80,9 +80,9 @@ void ClientSession::process_input() {
 
 void ClientSession::run_remote(protocol::Command cmd) {
     auto self(shared_from_this());
-    boost::asio::post(handler_.rpc_executor(), [this, self, cmd = std::move(cmd)]() {
+    boost::asio::post(handler_->rpc_executor(), [this, self, cmd = std::move(cmd)]() {
         auto reply = std::make_shared<std::string>();
-        handler_.execute(cmd, *reply);
+        handler_->execute(cmd, *reply);
         boost::asio::post(socket_.get_executor(), [this, self, reply]() {
             output_ += *reply;
             awaiting_rpc_ = false;

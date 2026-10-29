@@ -12,7 +12,7 @@ TCPServer::TCPServer(
 )
     : acceptor_(io_context, boost::asio::ip::tcp::endpoint(boost::asio::ip::tcp::v4(), port)),
       connection_pool_(connection_pool),
-      handler_(cluster, rpc_threads) {
+      handler_(std::make_shared<CommandHandler>(cluster, rpc_threads)) {
     Logger::instance().info("TCPServer listening on port " + std::to_string(port));
     start_accept();
 }
