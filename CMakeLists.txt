@@ -47,6 +47,7 @@ add_library(shardcache_lib
   network/client.cpp
   network/peer_pool.cpp
   network/io_context_pool.cpp
+  network/metrics_server.cpp
 )
 
 target_include_directories(shardcache_lib PUBLIC 

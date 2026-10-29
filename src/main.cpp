@@ -2,6 +2,7 @@
 #include "shardcache/logger.hpp"
 #include "tcp_server.hpp"
 #include "io_context_pool.hpp"
+#include "metrics_server.hpp"
 
 #include <iostream>
 #include <sstream>
@@ -116,6 +117,15 @@ int main(int argc, char* argv[]) {
         boost::asio::io_context accept_context;
         shardcache::network::IoContextPool io_pool(io_threads);
         shardcache::network::TCPServer server(accept_context, port, cluster, &io_pool, rpc_threads);
+
+        // METRICS_PORT=0 disables the HTTP endpoint; default is port + 2000.
+        int metrics_port = static_cast<int>(port) + 2000;
+        if (const char* env = std::getenv("METRICS_PORT")) metrics_port = std::atoi(env);
+        std::unique_ptr<shardcache::network::MetricsServer> metrics;
+        if (metrics_port > 0 && metrics_port < 65536) {
+            metrics = std::make_unique<shardcache::network::MetricsServer>(
+                accept_context, static_cast<uint16_t>(metrics_port), server.handler());
+        }
 
         shardcache::Logger::instance().info("ShardCache Engine running with " + std::to_string(io_threads) +
                                             " I/O threads and " + std::to_string(rpc_threads) +

@@ -154,9 +154,11 @@ std::optional<VersionedValue> Cache::get_versioned(const std::string& key) const
     std::shared_lock lock(mutex_);
     auto it = entries_.find(key);
     if (it == entries_.end() || it->second->entry.is_expired(now)) {
+        metrics_.misses.fetch_add(1, std::memory_order_relaxed);
         return std::nullopt;
     }
     const auto& e = it->second->entry;
+    (e.tombstone ? metrics_.misses : metrics_.hits).fetch_add(1, std::memory_order_relaxed);
     VersionedValue out{e.value, e.version, e.tombstone, std::nullopt};
     if (!e.tombstone && e.expires_at.has_value()) {
         out.ttl = std::chrono::duration_cast<std::chrono::milliseconds>(e.expires_at.value() - now);

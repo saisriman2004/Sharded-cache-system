@@ -12,6 +12,7 @@ constexpr std::size_t kMaxPendingOutput = 1024 * 1024;
 
 ClientSession::ClientSession(boost::asio::ip::tcp::socket socket, CommandHandler& handler)
     : socket_(std::move(socket)), handler_(handler) {
+    handler_.connection_opened();
     boost::system::error_code ec;
     socket_.set_option(boost::asio::ip::tcp::no_delay(true), ec);
 }

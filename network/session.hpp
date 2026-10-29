@@ -17,7 +17,7 @@ namespace shardcache::network {
 class ClientSession : public std::enable_shared_from_this<ClientSession> {
 public:
     ClientSession(boost::asio::ip::tcp::socket socket, CommandHandler& handler);
-    ~ClientSession() = default;
+    ~ClientSession() { handler_.connection_closed(); }
 
     void start();
 

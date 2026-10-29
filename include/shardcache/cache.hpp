@@ -62,7 +62,7 @@ public:
     bool apply(const std::string& key, const VersionedValue& v, bool* was_live = nullptr);
 
     // The stored entry with its version, including tombstones; nullopt if
-    // absent or expired.
+    // absent or expired. Counts as a hit only for a live value.
     std::optional<VersionedValue> get_versioned(const std::string& key) const;
 
     // Appends every unexpired entry (tombstones included) to `out`. Used to
@@ -114,7 +114,7 @@ private:
     std::list<Node> lru_list_;
     std::unordered_map<std::string, std::list<Node>::iterator> entries_;
 
-    CacheMetrics metrics_;
+    mutable CacheMetrics metrics_;  // updated by const lookups too
 };
 
 } // namespace shardcache

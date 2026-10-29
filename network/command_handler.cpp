@@ -61,6 +61,16 @@ bool CommandHandler::runs_locally(const protocol::Command& cmd) const {
 }
 
 void CommandHandler::execute(const protocol::Command& cmd, std::string& out) {
+    const auto start = std::chrono::steady_clock::now();
+    const std::size_t before = out.size();
+    dispatch(cmd, out);
+    auto& m = metrics_[static_cast<std::size_t>(cmd.type)];
+    m.calls.add();
+    if (out.size() > before && out[before] == '-') m.errors.add();
+    m.latency.observe(std::chrono::steady_clock::now() - start);
+}
+
+void CommandHandler::dispatch(const protocol::Command& cmd, std::string& out) {
     switch (cmd.type) {
         case CommandType::Ping:
             if (cmd.value.empty()) {

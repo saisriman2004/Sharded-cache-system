@@ -26,6 +26,7 @@ public:
     ~TCPServer() = default;
 
     void start_accept();
+    CommandHandler& handler() { return handler_; }
 
 private:
     boost::asio::ip::tcp::acceptor acceptor_;

@@ -63,6 +63,11 @@ public:
 
     void clear();
 
+    struct Totals {
+        uint64_t hits{0}, misses{0}, sets{0}, deletes{0}, evictions{0}, expirations{0};
+    };
+    Totals totals() const;
+
     uint64_t total_hits() const;
     uint64_t total_misses() const;
     double overall_hit_rate() const;

@@ -518,7 +518,9 @@ WriteResult Cluster::replicate(const std::string& key, const VersionedValue& v) 
     state->cv.wait_for(lock, config_.rpc_timeout * 2, [&]() {
         return state->acks >= needed || state->done == targets.size();
     });
-    return WriteResult{state->acks >= needed, state->existed, state->acks};
+    const bool ok = state->acks >= needed;
+    if (!ok) write_quorum_failures_.fetch_add(1, std::memory_order_relaxed);
+    return WriteResult{ok, state->existed, state->acks};
 }
 
 std::optional<uint64_t> Cluster::next_version(const std::string& key) {
@@ -527,7 +529,10 @@ std::optional<uint64_t> Cluster::next_version(const std::string& key) {
         // write above it. Without this, a coordinator that missed an earlier,
         // completed write could stamp a lower version and silently lose.
         auto replies = collect(key);
-        if (!replies.ok) return std::nullopt;
+        if (!replies.ok) {
+            write_quorum_failures_.fetch_add(1, std::memory_order_relaxed);
+            return std::nullopt;
+        }
         for (std::size_t i = 0; i < replies.values.size(); ++i) {
             if (replies.replied[i] && replies.values[i].has_value()) {
                 clock_.observe(replies.values[i]->version);
@@ -638,7 +643,10 @@ ReadResult Cluster::read(const std::string& key) {
     }
 
     auto replies = collect(key);
-    if (!replies.ok) return {};
+    if (!replies.ok) {
+        read_quorum_failures_.fetch_add(1, std::memory_order_relaxed);
+        return {};
+    }
     const auto& targets = replies.targets;
 
     std::optional<VersionedValue> winner;
@@ -663,6 +671,7 @@ ReadResult Cluster::read(const std::string& key) {
     }
 
     const std::size_t write_quorum = effective_quorum(config_.write_quorum, targets.size());
+    read_repairs_.fetch_add(stale.size(), std::memory_order_relaxed);
     if (config_.consistency == Consistency::Linearizable && up_to_date < write_quorum) {
         // ABD read phase 2: the winner may come from a write still in flight.
         // Before returning it, make sure a write quorum stores it, so that no
@@ -752,8 +761,27 @@ void Cluster::add_hint(const CacheNode& node, const std::string& key, const Vers
     auto& queue = hints_[node.id];
     if (queue.size() >= config_.max_hints_per_node) {
         queue.pop_front();
+        hints_dropped_.fetch_add(1, std::memory_order_relaxed);
     }
     queue.push_back(Hint{key, v, deadline});
+}
+
+ClusterStats Cluster::stats() const {
+    ClusterStats s;
+    s.read_quorum_failures = read_quorum_failures_.load();
+    s.write_quorum_failures = write_quorum_failures_.load();
+    s.read_repairs = read_repairs_.load();
+    s.hints_delivered = hints_delivered_.load();
+    s.hints_dropped = hints_dropped_.load();
+    s.keys_moved = keys_moved_.load();
+    s.hints_pending = pending_hints();
+    std::shared_lock lock(membership_mutex_);
+    s.ring_nodes = nodes_.size();
+    for (const auto& [id, _] : nodes_) {
+        auto h = node_health_.find(id);
+        s.healthy_nodes += (h == node_health_.end() || h->second) ? 1 : 0;
+    }
+    return s;
 }
 
 std::size_t Cluster::pending_hints() const {
@@ -823,6 +851,7 @@ void Cluster::replay_hints() {
                 batch.pop_back();
             }
         }
+        hints_delivered_.fetch_add(delivered, std::memory_order_relaxed);
         if (delivered > 0) {
             Logger::instance().info("Hinted handoff delivered " + std::to_string(delivered) + " writes to " + id);
         }

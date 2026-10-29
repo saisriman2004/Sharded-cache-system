@@ -73,6 +73,19 @@ struct ReadResult {
     VersionedValue value{};
 };
 
+// Monotonic counters exported as Prometheus metrics.
+struct ClusterStats {
+    uint64_t read_quorum_failures{0};
+    uint64_t write_quorum_failures{0};
+    uint64_t read_repairs{0};     // stale replicas repaired by reads
+    uint64_t hints_delivered{0};
+    uint64_t hints_dropped{0};    // overflowed max_hints_per_node
+    uint64_t keys_moved{0};       // pushed to new owners by rebalancing
+    std::size_t hints_pending{0};
+    std::size_t healthy_nodes{0};
+    std::size_t ring_nodes{0};
+};
+
 struct WriteResult {
     bool ok{false};       // write quorum reached
     bool existed{false};  // key was live on at least one acknowledging replica
@@ -125,6 +138,7 @@ public:
     // background after membership changes; public for tests.
     void rebalance_now();
     uint64_t keys_moved() const { return keys_moved_.load(); }
+    ClusterStats stats() const;
 
     // --- Coordinated operations ---
     ReadResult read(const std::string& key);
@@ -232,6 +246,11 @@ private:
     bool rebalance_requested_{false};
     std::shared_ptr<const RoutingTable> placed_for_;  // table the local data was last placed for
     std::atomic<uint64_t> keys_moved_{0};
+    std::atomic<uint64_t> read_quorum_failures_{0};
+    std::atomic<uint64_t> write_quorum_failures_{0};
+    std::atomic<uint64_t> read_repairs_{0};
+    std::atomic<uint64_t> hints_delivered_{0};
+    std::atomic<uint64_t> hints_dropped_{0};
 
     std::mutex gossip_wake_mutex_;
     std::condition_variable gossip_cv_;

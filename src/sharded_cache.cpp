@@ -142,6 +142,20 @@ void ShardedCache::clear() {
     }
 }
 
+ShardedCache::Totals ShardedCache::totals() const {
+    Totals t;
+    for (const auto& shard : shards_) {
+        const auto& m = shard->metrics();
+        t.hits += m.hits.load(std::memory_order_relaxed);
+        t.misses += m.misses.load(std::memory_order_relaxed);
+        t.sets += m.sets.load(std::memory_order_relaxed);
+        t.deletes += m.deletes.load(std::memory_order_relaxed);
+        t.evictions += m.evictions.load(std::memory_order_relaxed);
+        t.expirations += m.expirations.load(std::memory_order_relaxed);
+    }
+    return t;
+}
+
 uint64_t ShardedCache::total_hits() const {
     uint64_t hits = 0;
     for (const auto& shard : shards_) {
