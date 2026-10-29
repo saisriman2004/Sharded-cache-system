@@ -2,6 +2,7 @@
 #define SHARDCACHE_TCP_SERVER_HPP
 
 #include "session.hpp"
+#include "command_handler.hpp"
 #include "shardcache/cluster.hpp"
 
 #include <boost/asio.hpp>
@@ -19,7 +20,7 @@ public:
 
 private:
     boost::asio::ip::tcp::acceptor acceptor_;
-    Cluster& cluster_;
+    CommandHandler handler_;
 };
 
 } // namespace shardcache::network

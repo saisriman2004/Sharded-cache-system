@@ -43,7 +43,7 @@ public:
     bool set(
         const std::string& key,
         const std::string& value,
-        std::optional<std::chrono::seconds> ttl = std::nullopt
+        std::optional<std::chrono::milliseconds> ttl = std::nullopt
     );
 
     std::optional<std::string> get(const std::string& key);
@@ -51,13 +51,14 @@ public:
 
     bool remove(const std::string& key);
 
-    bool expire(const std::string& key, std::chrono::seconds ttl);
-    std::optional<std::chrono::seconds> ttl(const std::string& key);
+    bool expire(const std::string& key, std::chrono::milliseconds ttl);
+    // Redis PTTL semantics: -2 absent, -1 no expiry, else remaining milliseconds.
+    int64_t pttl(const std::string& key);
 
     std::string get_or_load(
         const std::string& key,
         std::function<std::string()> loader,
-        std::optional<std::chrono::seconds> ttl = std::nullopt
+        std::optional<std::chrono::milliseconds> ttl = std::nullopt
     );
 
     std::size_t node_count() const;

@@ -27,7 +27,7 @@ public:
     void set(
         const std::string& key,
         const std::string& value,
-        std::optional<std::chrono::seconds> ttl = std::nullopt
+        std::optional<std::chrono::milliseconds> ttl = std::nullopt
     );
 
     std::optional<std::string> get(const std::string& key);
@@ -36,13 +36,14 @@ public:
 
     bool contains(const std::string& key);
 
-    bool expire(const std::string& key, std::chrono::seconds ttl);
+    bool expire(const std::string& key, std::chrono::milliseconds ttl);
     std::optional<std::chrono::seconds> ttl(const std::string& key);
+    int64_t pttl(const std::string& key);
 
     std::string get_or_load(
         const std::string& key,
         std::function<std::string()> loader,
-        std::optional<std::chrono::seconds> ttl = std::nullopt
+        std::optional<std::chrono::milliseconds> ttl = std::nullopt
     );
 
     void purge_expired();

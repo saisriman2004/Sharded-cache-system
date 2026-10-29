@@ -1,11 +1,20 @@
 #include "session.hpp"
+#include "protocol/parser.hpp"
+#include "protocol/resp.hpp"
 #include "shardcache/logger.hpp"
-#include <iostream>
 
 namespace shardcache::network {
 
-ClientSession::ClientSession(boost::asio::ip::tcp::socket socket, Cluster& cluster)
-    : socket_(std::move(socket)), cluster_(cluster) {}
+namespace {
+// Stop parsing more pipelined commands once this many reply bytes are queued.
+constexpr std::size_t kMaxPendingOutput = 1024 * 1024;
+} // namespace
+
+ClientSession::ClientSession(boost::asio::ip::tcp::socket socket, CommandHandler& handler)
+    : socket_(std::move(socket)), handler_(handler) {
+    boost::system::error_code ec;
+    socket_.set_option(boost::asio::ip::tcp::no_delay(true), ec);
+}
 
 void ClientSession::start() {
     do_read();
@@ -13,145 +22,88 @@ void ClientSession::start() {
 
 void ClientSession::do_read() {
     auto self(shared_from_this());
-    boost::asio::async_read_until(
-        socket_,
-        buffer_,
-        "\r\n",
-        [this, self](boost::system::error_code ec, std::size_t /*bytes_transferred*/) {
-            if (!ec) {
-                std::string line;
-                std::istream is(&buffer_);
-                std::getline(is, line);
-                if (!line.empty() && line.back() == '\r') {
-                    line.pop_back();
-                }
-
-                process_command_line(line);
+    socket_.async_read_some(
+        boost::asio::buffer(read_chunk_),
+        [this, self](boost::system::error_code ec, std::size_t n) {
+            if (ec) {
+                close();
+                return;
             }
+            input_.append(read_chunk_.data(), n);
+            process_input();
         }
     );
 }
 
-void ClientSession::process_command_line(const std::string& line) {
-    if (line.empty()) {
-        do_read();
+void ClientSession::process_input() {
+    std::size_t offset = 0;
+    std::vector<std::string> args;
+    std::string error;
+
+    while (!closing_ && offset < input_.size() && output_.size() < kMaxPendingOutput) {
+        std::size_t consumed = 0;
+        auto status = protocol::parse_request(std::string_view(input_).substr(offset), args, consumed, error);
+        if (status == protocol::ParseStatus::Incomplete) {
+            break;
+        }
+        if (status == protocol::ParseStatus::Error) {
+            protocol::resp::append_error(output_, error);
+            closing_ = true;
+            break;
+        }
+        offset += consumed;
+        if (args.empty()) {
+            continue;
+        }
+
+        auto cmd = protocol::Parser::parse(args);
+        handler_.execute(cmd, output_);
+        if (cmd.type == protocol::CommandType::Quit) {
+            closing_ = true;
+        }
+    }
+
+    input_.erase(0, offset);
+    flush();
+}
+
+void ClientSession::flush() {
+    if (output_.empty()) {
+        if (closing_) {
+            close();
+        } else {
+            do_read();
+        }
         return;
     }
 
-    using namespace protocol;
-    Command cmd = Parser::parse(line);
-    std::string resp;
+    writing_.swap(output_);
+    output_.clear();
 
-    switch (cmd.type) {
-        case CommandType::Ping:
-            resp = Response::pong();
-            break;
-
-        // --- External commands routed through Cluster ---
-        case CommandType::Set: {
-            auto ttl = cmd.ttl_seconds.has_value()
-                ? std::optional<std::chrono::seconds>(std::chrono::seconds(cmd.ttl_seconds.value()))
-                : std::nullopt;
-            bool success = cluster_.set(cmd.key, cmd.value, ttl);
-            if (success) {
-                resp = Response::ok();
-            } else {
-                resp = Response::error("WRITE_FAILED");
-            }
-            break;
-        }
-        case CommandType::Get: {
-            auto val = cluster_.get(cmd.key);
-            if (val.has_value()) {
-                resp = Response::value(val.value());
-            } else {
-                resp = Response::not_found();
-            }
-            break;
-        }
-        case CommandType::Delete: {
-            bool removed = cluster_.remove(cmd.key);
-            resp = removed ? Response::ok() : Response::not_found();
-            break;
-        }
-        case CommandType::Exists: {
-            bool exists = cluster_.exists(cmd.key);
-            resp = Response::integer(exists ? 1 : 0);
-            break;
-        }
-        case CommandType::Expire: {
-            if (!cmd.ttl_seconds.has_value()) {
-                resp = Response::error("EXPIRE requires key and TTL seconds");
-            } else {
-                bool ok = cluster_.expire(cmd.key, std::chrono::seconds(cmd.ttl_seconds.value()));
-                resp = ok ? Response::ok() : Response::not_found();
-            }
-            break;
-        }
-        case CommandType::Ttl: {
-            auto remaining = cluster_.ttl(cmd.key);
-            if (remaining.has_value()) {
-                resp = Response::integer(remaining.value().count());
-            } else {
-                resp = Response::integer(-1);
-            }
-            break;
-        }
-        case CommandType::Stats: {
-            auto& cache = cluster_.local_cache();
-            std::string stats_body = "entries:" + std::to_string(cache.size()) + "\r\n" +
-                                     "capacity:" + std::to_string(cache.capacity()) + "\r\n" +
-                                     "hits:" + std::to_string(cache.total_hits()) + "\r\n" +
-                                     "misses:" + std::to_string(cache.total_misses()) + "\r\n" +
-                                     "hit_rate:" + std::to_string(cache.overall_hit_rate()) + "%\r\n";
-            resp = Response::stats(stats_body);
-            break;
-        }
-
-        // --- Internal replication commands: write DIRECTLY to local cache ---
-        // These must never be routed through Cluster again.
-        case CommandType::ReplSet: {
-            auto ttl_opt = cmd.ttl_seconds.has_value()
-                ? std::optional<std::chrono::seconds>(std::chrono::seconds(cmd.ttl_seconds.value()))
-                : std::nullopt;
-            cluster_.local_cache().set(cmd.key, cmd.value, ttl_opt);
-            resp = Response::ok();
-            break;
-        }
-        case CommandType::ReplDelete: {
-            cluster_.local_cache().remove(cmd.key);
-            resp = Response::ok();
-            break;
-        }
-        case CommandType::ReplExpire: {
-            if (cmd.ttl_seconds.has_value()) {
-                cluster_.local_cache().expire(cmd.key, std::chrono::seconds(cmd.ttl_seconds.value()));
-            }
-            resp = Response::ok();
-            break;
-        }
-
-        default:
-            resp = Response::error("Unknown command");
-            break;
-    }
-
-    do_write(std::make_shared<std::string>(std::move(resp)));
-}
-
-void ClientSession::do_write(std::shared_ptr<std::string> response) {
     auto self(shared_from_this());
     boost::asio::async_write(
         socket_,
-        boost::asio::buffer(*response),
-        [this, self, response](boost::system::error_code ec, std::size_t /*bytes_transferred*/) {
-            if (!ec) {
-                do_read();
+        boost::asio::buffer(writing_),
+        [this, self](boost::system::error_code ec, std::size_t /*bytes_transferred*/) {
+            if (ec) {
+                close();
+                return;
+            }
+            writing_.clear();
+            // More pipelined commands may already be buffered.
+            if (!closing_ && !input_.empty()) {
+                process_input();
             } else {
-                Logger::instance().error("TCP write error: " + ec.message());
+                flush();
             }
         }
     );
+}
+
+void ClientSession::close() {
+    boost::system::error_code ec;
+    socket_.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+    socket_.close(ec);
 }
 
 } // namespace shardcache::network

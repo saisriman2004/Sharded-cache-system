@@ -14,7 +14,7 @@ bool ReplicationManager::replicate_set(
     const std::vector<CacheNode>& replicas,
     const std::string& key,
     const std::string& value,
-    std::optional<std::chrono::seconds> ttl
+    std::optional<std::chrono::milliseconds> ttl
 ) {
     if (replicas.empty()) return true;
 
@@ -25,11 +25,11 @@ bool ReplicationManager::replicate_set(
         Logger::instance().debug("Replicating SET for key '" + key + "' to node " + node.id + " (" + node.host + ":" + std::to_string(node.port) + ")");
         network::Client client(node.host, node.port);
         if (client.connect()) {
-            std::optional<uint64_t> ttl_sec = std::nullopt;
+            std::optional<uint64_t> ttl_ms = std::nullopt;
             if (ttl.has_value()) {
-                 ttl_sec = static_cast<uint64_t>(ttl.value().count());
+                ttl_ms = static_cast<uint64_t>(ttl.value().count());
             }
-            auto res = client.replica_set(key, value, ttl_sec);
+            auto res = client.replica_set(key, value, ttl_ms);
             if (!res.is_ok()) {
                 Logger::instance().warning("Failed replication SET to replica node " + node.id + ": " + res.message);
                 all_ok = false;
@@ -69,7 +69,7 @@ bool ReplicationManager::replicate_delete(
 bool ReplicationManager::replicate_expire(
     const std::vector<CacheNode>& replicas,
     const std::string& key,
-    std::chrono::seconds ttl
+    std::chrono::milliseconds ttl
 ) {
     if (replicas.empty()) return true;
 

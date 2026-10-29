@@ -126,7 +126,7 @@ void Cluster::set_node_health(const std::string& node_id, bool healthy) {
 bool Cluster::set(
     const std::string& key,
     const std::string& value,
-    std::optional<std::chrono::seconds> ttl
+    std::optional<std::chrono::milliseconds> ttl
 ) {
     std::optional<CacheNode> primary;
     std::vector<CacheNode> replicas;
@@ -152,11 +152,11 @@ bool Cluster::set(
     Logger::instance().debug("Forwarding SET key '" + key + "' to primary node " + primary->id + " (" + primary->host + ":" + std::to_string(primary->port) + ")");
     network::Client client(primary->host, primary->port);
     if (client.connect()) {
-        std::optional<uint64_t> ttl_sec = std::nullopt;
+        std::optional<uint64_t> ttl_ms = std::nullopt;
         if (ttl.has_value()) {
-            ttl_sec = static_cast<uint64_t>(ttl.value().count());
+            ttl_ms = static_cast<uint64_t>(ttl.value().count());
         }
-        auto res = client.set(key, value, ttl_sec);
+        auto res = client.set(key, value, ttl_ms);
         return res.is_ok();
     }
 
@@ -228,7 +228,7 @@ bool Cluster::remove(const std::string& key) {
     return false;
 }
 
-bool Cluster::expire(const std::string& key, std::chrono::seconds ttl) {
+bool Cluster::expire(const std::string& key, std::chrono::milliseconds ttl) {
     std::optional<CacheNode> primary;
     std::vector<CacheNode> replicas;
     {
@@ -259,34 +259,29 @@ bool Cluster::expire(const std::string& key, std::chrono::seconds ttl) {
     return false;
 }
 
-std::optional<std::chrono::seconds> Cluster::ttl(const std::string& key) {
-    std::optional<CacheNode> primary;
-    {
-        std::shared_lock lock(membership_mutex_);
-        primary = ring_.locate(key);
+int64_t Cluster::pttl(const std::string& key) {
+    auto target = locate(key);
+    if (!target.has_value() || target->id == local_node_.id) {
+        return local_cache_.pttl(key);
     }
 
-    if (!primary.has_value() || primary->id == local_node_.id) {
-        return local_cache_.ttl(key);
-    }
-
-    network::Client client(primary->host, primary->port);
+    network::Client client(target->host, target->port);
     if (client.connect()) {
-        auto res = client.ttl(key);
+        auto res = client.pttl(key);
         if (res.is_ok() && res.value.has_value()) {
-            return std::chrono::seconds(res.value.value());
+            return res.value.value();
         }
-        return std::nullopt;
+        return -2;
     }
 
-    Logger::instance().warning("Primary node " + primary->id + " unreachable for TTL key '" + key + "'");
-    return std::nullopt;
+    Logger::instance().warning("Node " + target->id + " unreachable for TTL key '" + key + "'");
+    return -2;
 }
 
 std::string Cluster::get_or_load(
     const std::string& key,
     std::function<std::string()> loader,
-    std::optional<std::chrono::seconds> ttl
+    std::optional<std::chrono::milliseconds> ttl
 ) {
     return local_cache_.get_or_load(key, loader, ttl);
 }

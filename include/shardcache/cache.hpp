@@ -43,7 +43,7 @@ public:
     void set(
         const std::string& key,
         const std::string& value,
-        std::optional<std::chrono::seconds> ttl = std::nullopt
+        std::optional<std::chrono::milliseconds> ttl = std::nullopt
     );
 
     std::optional<std::string> get(const std::string& key);
@@ -58,8 +58,11 @@ public:
 
     void clear();
 
-    bool expire(const std::string& key, std::chrono::seconds ttl);
+    bool expire(const std::string& key, std::chrono::milliseconds ttl);
     std::optional<std::chrono::seconds> ttl(const std::string& key) const;
+    // Redis PTTL semantics: -2 if the key is absent, -1 if it has no expiry,
+    // otherwise the remaining time in milliseconds.
+    int64_t pttl(const std::string& key) const;
 
     const CacheMetrics& metrics() const { return metrics_; }
 

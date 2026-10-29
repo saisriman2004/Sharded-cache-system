@@ -2,6 +2,7 @@
 #define SHARDCACHE_COMMAND_HPP
 
 #include <string>
+#include <vector>
 #include <optional>
 #include <cstdint>
 
@@ -14,8 +15,18 @@ enum class CommandType {
     Exists,
     Expire,
     Ttl,
+    Pttl,
     Stats,
     Ping,
+    Echo,
+    DbSize,
+    FlushAll,
+    // Connection-level commands that Redis tooling sends during handshakes.
+    CommandDocs,
+    Config,
+    Select,
+    Client,
+    Quit,
     // Internal replication commands — these write directly to the
     // receiving node's local cache and must never be routed through
     // the cluster hash ring again.
@@ -27,9 +38,11 @@ enum class CommandType {
 
 struct Command {
     CommandType type{CommandType::Unknown};
-    std::string key{};
+    std::string key{};               // first key argument
+    std::vector<std::string> keys{}; // all key arguments (DEL / EXISTS)
     std::string value{};
-    std::optional<uint64_t> ttl_seconds{std::nullopt};
+    std::optional<uint64_t> ttl_ms{std::nullopt};
+    std::string error{};             // set when type == Unknown
 };
 
 } // namespace shardcache::protocol

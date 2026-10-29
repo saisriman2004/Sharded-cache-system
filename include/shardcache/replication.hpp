@@ -27,7 +27,7 @@ public:
         const std::vector<CacheNode>& replicas,
         const std::string& key,
         const std::string& value,
-        std::optional<std::chrono::seconds> ttl = std::nullopt
+        std::optional<std::chrono::milliseconds> ttl = std::nullopt
     );
 
     bool replicate_delete(
@@ -38,7 +38,7 @@ public:
     bool replicate_expire(
         const std::vector<CacheNode>& replicas,
         const std::string& key,
-        std::chrono::seconds ttl
+        std::chrono::milliseconds ttl
     );
 
     ReplicationMode mode() const { return mode_; }

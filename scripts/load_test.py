@@ -1,51 +1,84 @@
 #!/usr/bin/env python3
-import socket
-import time
-import sys
+"""Closed-loop RESP load generator: each client issues SET then GET and waits
+for every reply. For serious measurements use memtier_benchmark or
+redis-benchmark (see benchmarks/); this script is a dependency-free smoke test.
+"""
 import concurrent.futures
+import socket
+import sys
+import time
 
 HOST = '127.0.0.1'
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9090
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 7001
 CONCURRENT_CLIENTS = int(sys.argv[2]) if len(sys.argv) > 2 else 16
 OPS_PER_CLIENT = int(sys.argv[3]) if len(sys.argv) > 3 else 1000
 
-def send_command(sock, cmd):
-    sock.sendall((cmd + '\r\n').encode('utf-8'))
-    data = sock.recv(1024)
-    return data.decode('utf-8')
+
+def encode(*args):
+    out = [f"*{len(args)}\r\n".encode()]
+    for a in args:
+        b = str(a).encode()
+        out.append(f"${len(b)}\r\n".encode() + b + b"\r\n")
+    return b"".join(out)
+
+
+class Conn:
+    def __init__(self, host, port):
+        self.sock = socket.create_connection((host, port), timeout=5)
+        self.buf = b""
+
+    def _line(self):
+        while b"\r\n" not in self.buf:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise ConnectionError("server closed connection")
+            self.buf += chunk
+        line, self.buf = self.buf.split(b"\r\n", 1)
+        return line
+
+    def call(self, *args):
+        self.sock.sendall(encode(*args))
+        line = self._line()
+        kind, rest = line[:1], line[1:]
+        if kind == b"-":
+            raise RuntimeError(rest.decode())
+        if kind == b"$":
+            n = int(rest)
+            if n < 0:
+                return None
+            while len(self.buf) < n + 2:
+                self.buf += self.sock.recv(65536)
+            data, self.buf = self.buf[:n], self.buf[n + 2:]
+            return data.decode()
+        return rest.decode()
+
 
 def run_client(client_id):
+    conn = Conn(HOST, PORT)
     hits = 0
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((HOST, PORT))
-            for i in range(OPS_PER_CLIENT):
-                key = f"user_{client_id}_{i}"
-                val = f"data_{i}"
-                send_command(s, f"SET {key} {val}")
-                res = send_command(s, f"GET {key}")
-                if "VALUE" in res:
-                    hits += 1
-    except Exception as e:
-        print(f"Client {client_id} error: {e}")
+    for i in range(OPS_PER_CLIENT):
+        key = f"user_{client_id}_{i}"
+        conn.call("SET", key, f"data_{i}")
+        if conn.call("GET", key) is not None:
+            hits += 1
     return hits
 
-def main():
-    print(f"Starting load test on {HOST}:{PORT} with {CONCURRENT_CLIENTS} concurrent clients ({OPS_PER_CLIENT * 2} ops/client)...")
-    start_time = time.time()
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENT_CLIENTS) as executor:
-        futures = [executor.submit(run_client, i) for i in range(CONCURRENT_CLIENTS)]
-        total_hits = sum(f.result() for f in concurrent.futures.as_completed(futures))
-        
-    duration = time.time() - start_time
-    total_ops = CONCURRENT_CLIENTS * OPS_PER_CLIENT * 2
-    ops_per_sec = total_ops / duration if duration > 0 else 0
 
-    print(f"Load test completed in {duration:.2f} seconds.")
-    print(f"Total Operations: {total_ops}")
-    print(f"Successful Hits: {total_hits}")
-    print(f"Throughput: {ops_per_sec:.2f} ops/sec")
+def main():
+    print(f"Load test on {HOST}:{PORT}: {CONCURRENT_CLIENTS} clients x {OPS_PER_CLIENT * 2} ops")
+    start = time.time()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENT_CLIENTS) as pool:
+        futures = [pool.submit(run_client, i) for i in range(CONCURRENT_CLIENTS)]
+        try:
+            total_hits = sum(f.result() for f in futures)
+        except Exception as e:  # any failed client invalidates the run
+            print(f"FAILED: {e}", file=sys.stderr)
+            sys.exit(1)
+    duration = time.time() - start
+    total_ops = CONCURRENT_CLIENTS * OPS_PER_CLIENT * 2
+    print(f"Completed in {duration:.2f}s, {total_ops} ops, {total_hits} hits")
+    print(f"Throughput: {total_ops / duration:.0f} ops/sec")
+
 
 if __name__ == '__main__':
     main()

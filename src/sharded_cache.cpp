@@ -38,7 +38,7 @@ std::size_t ShardedCache::get_shard_index(const std::string& key) const {
 void ShardedCache::set(
     const std::string& key,
     const std::string& value,
-    std::optional<std::chrono::seconds> ttl
+    std::optional<std::chrono::milliseconds> ttl
 ) {
     std::size_t idx = get_shard_index(key);
     shards_[idx]->set(key, value, ttl);
@@ -59,7 +59,7 @@ bool ShardedCache::contains(const std::string& key) {
     return shards_[idx]->contains(key);
 }
 
-bool ShardedCache::expire(const std::string& key, std::chrono::seconds ttl) {
+bool ShardedCache::expire(const std::string& key, std::chrono::milliseconds ttl) {
     std::size_t idx = get_shard_index(key);
     return shards_[idx]->expire(key, ttl);
 }
@@ -69,10 +69,15 @@ std::optional<std::chrono::seconds> ShardedCache::ttl(const std::string& key) {
     return shards_[idx]->ttl(key);
 }
 
+int64_t ShardedCache::pttl(const std::string& key) {
+    std::size_t idx = get_shard_index(key);
+    return shards_[idx]->pttl(key);
+}
+
 std::string ShardedCache::get_or_load(
     const std::string& key,
     std::function<std::string()> loader,
-    std::optional<std::chrono::seconds> ttl
+    std::optional<std::chrono::milliseconds> ttl
 ) {
     auto val = get(key);
     if (val.has_value()) {

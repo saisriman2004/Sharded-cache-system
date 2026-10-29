@@ -40,6 +40,8 @@ add_library(shardcache_lib
   src/sharded_cache.cpp
   src/logger.cpp
   protocol/parser.cpp
+  protocol/resp.cpp
+  network/command_handler.cpp
   network/session.cpp
   network/tcp_server.cpp
   network/client.cpp
