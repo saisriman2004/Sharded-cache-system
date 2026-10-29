@@ -27,6 +27,7 @@ protected:
         config.replication_factor = 3;
         config.cache_capacity = 1000;
         config.rpc_timeout = std::chrono::milliseconds(300);
+        config.consistency = consistency();
 
         for (std::size_t i = 0; i < 3; ++i) {
             clusters_.push_back(std::make_unique<shardcache::Cluster>(nodes_[i], config));
@@ -43,6 +44,8 @@ protected:
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
+
+    virtual shardcache::Consistency consistency() const { return shardcache::Consistency::Quorum; }
 
     void TearDown() override {
         for (std::size_t i = 0; i < 3; ++i) {
@@ -306,4 +309,71 @@ TEST_F(ThreeNodeClusterTest, DistributedExistsAndTtl) {
 
     EXPECT_TRUE(connect(1)->expire("exists_test_key", 5000).is_ok());
     EXPECT_LE(clusters_[0]->pttl("exists_test_key"), 5000);
+}
+
+// --- Consistency modes -------------------------------------------------------
+// Both tests below set up, deterministically, an interleaving that the chaos
+// harness (chaos/) found by chance.
+
+TEST_F(ThreeNodeClusterTest, QuorumModeLosesWriteFromCoordinatorWithLaggingClock) {
+    // A completed write stamped with a version from the future (as if its
+    // coordinator's clock ran ahead) reaches A and B but not C.
+    uint64_t future = shardcache::HybridClock().now() + (uint64_t{60'000} << shardcache::HybridClock::kLogicalBits);
+    clusters_[0]->local_cache().apply("lagging", VersionedValue{"earlier", future});
+    clusters_[1]->local_cache().apply("lagging", VersionedValue{"earlier", future});
+
+    // A later write coordinated by C, which never saw that version, gets a
+    // lower stamp: it is acknowledged, yet last-writer-wins discards it.
+    ASSERT_TRUE(connect(2)->set("lagging", "later").is_ok());
+    EXPECT_EQ(connect(0)->get("lagging").value.value_or(""), "earlier");
+}
+
+class LinearizableClusterTest : public ThreeNodeClusterTest {
+protected:
+    shardcache::Consistency consistency() const override { return shardcache::Consistency::Linearizable; }
+};
+
+TEST_F(LinearizableClusterTest, WriteQueriesVersionsFirst) {
+    uint64_t future = shardcache::HybridClock().now() + (uint64_t{60'000} << shardcache::HybridClock::kLogicalBits);
+    clusters_[0]->local_cache().apply("lagging", VersionedValue{"earlier", future});
+    clusters_[1]->local_cache().apply("lagging", VersionedValue{"earlier", future});
+
+    // C reads the highest version from a quorum before stamping its write.
+    ASSERT_TRUE(connect(2)->set("lagging", "later").is_ok());
+    EXPECT_EQ(connect(0)->get("lagging").value.value_or(""), "later");
+    EXPECT_GT(clusters_[0]->local_cache().get_versioned("lagging")->version, future);
+}
+
+TEST_F(LinearizableClusterTest, ReadWritesBackBeforeReturning) {
+    // A write still in flight: only A has the new value so far.
+    ASSERT_TRUE(connect(0)->set("inflight", "old").is_ok());
+    ASSERT_TRUE(eventually([&]() { return clusters_[2]->local_cache().get("inflight") == "old"; }));
+    auto version = clusters_[0]->local_cache().get_versioned("inflight")->version;
+    clusters_[0]->local_cache().apply("inflight", VersionedValue{"new", version + 1});
+
+    // A read that returns "new" must first store it on a write quorum...
+    auto first = connect(0)->get("inflight");
+    ASSERT_EQ(first.value.value_or(""), "new");
+    int replicas_with_new = 0;
+    for (std::size_t i = 0; i < 3; ++i) {
+        replicas_with_new += clusters_[i]->local_cache().get("inflight") == "new" ? 1 : 0;
+    }
+    EXPECT_GE(replicas_with_new, 2) << "checked synchronously, without waiting for background repair";
+
+    // ...so a later read through the node that never saw the write cannot go back in time.
+    stop_node(0);
+    mark_health(0, false);
+    EXPECT_EQ(connect(2)->get("inflight").value.value_or(""), "new");
+}
+
+TEST_F(LinearizableClusterTest, BasicOperationsStillWork) {
+    auto a = connect(0);
+    auto c = connect(2);
+    ASSERT_TRUE(a->set("k", "v1").is_ok());
+    EXPECT_EQ(c->get("k").value.value_or(""), "v1");
+    EXPECT_TRUE(c->remove("k").is_ok());
+    EXPECT_TRUE(a->get("k").is_not_found());
+    ASSERT_TRUE(a->set("k", "v2", 60000).is_ok());
+    EXPECT_TRUE(c->expire("k", 5000).is_ok());
+    EXPECT_LE(clusters_[1]->pttl("k"), 5000);
 }

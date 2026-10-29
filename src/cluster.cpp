@@ -195,7 +195,7 @@ bool Cluster::can_serve_locally(const std::string& key, bool is_write) const {
     const std::size_t point = table.point_for(key);
     if (!table.local_is_replica(point)) return false;
     const std::size_t replicas = table.replicas(point).size();
-    if (is_write) return replicas == 1;
+    if (is_write || config_.consistency == Consistency::Linearizable) return replicas == 1;
     return effective_quorum(config_.read_quorum, replicas) == 1;
 }
 
@@ -269,16 +269,38 @@ WriteResult Cluster::replicate(const std::string& key, const VersionedValue& v) 
     return WriteResult{state->acks >= needed, state->existed, state->acks};
 }
 
+std::optional<uint64_t> Cluster::next_version(const std::string& key) {
+    if (config_.consistency == Consistency::Linearizable && !can_serve_locally(key, true)) {
+        // ABD write phase 1: learn the highest version a read quorum holds and
+        // write above it. Without this, a coordinator that missed an earlier,
+        // completed write could stamp a lower version and silently lose.
+        auto replies = collect(key);
+        if (!replies.ok) return std::nullopt;
+        for (std::size_t i = 0; i < replies.values.size(); ++i) {
+            if (replies.replied[i] && replies.values[i].has_value()) {
+                clock_.observe(replies.values[i]->version);
+            }
+        }
+    }
+    return clock_.now();
+}
+
 WriteResult Cluster::put(const std::string& key, const std::string& value,
                          std::optional<std::chrono::milliseconds> ttl) {
-    return replicate(key, VersionedValue{value, clock_.now(), false, ttl});
+    auto version = next_version(key);
+    if (!version) return {};
+    return replicate(key, VersionedValue{value, version.value(), false, ttl});
 }
 
 WriteResult Cluster::del(const std::string& key) {
-    return replicate(key, VersionedValue{"", clock_.now(), true, std::nullopt});
+    auto version = next_version(key);
+    if (!version) return {};
+    return replicate(key, VersionedValue{"", version.value(), true, std::nullopt});
 }
 
 WriteResult Cluster::expire_key(const std::string& key, std::chrono::milliseconds ttl) {
+    // The read already observes the newest version, so it doubles as the
+    // version query of a linearizable write.
     auto current = read(key);
     if (current.status == ReadStatus::Unavailable) return {};
     if (current.status == ReadStatus::NotFound) return WriteResult{true, false, 0};
@@ -290,20 +312,11 @@ WriteResult Cluster::expire_key(const std::string& key, std::chrono::millisecond
 // ---------------------------------------------------------------------------
 // Reads
 
-ReadResult Cluster::read(const std::string& key) {
-    auto to_result = [](std::optional<VersionedValue>&& v) {
-        if (!v.has_value() || v->tombstone) return ReadResult{ReadStatus::NotFound, {}};
-        return ReadResult{ReadStatus::Found, std::move(v.value())};
-    };
-
-    // Fast path: this node's copy alone satisfies the read quorum.
-    if (can_serve_locally(key, false)) {
-        return to_result(local_cache_.get_versioned(key));
-    }
-
-    const auto targets = preference_list(key);
-    if (targets.empty()) return {};
-    const std::size_t needed = effective_quorum(config_.read_quorum, targets.size());
+Cluster::QuorumReplies Cluster::collect(const std::string& key) {
+    QuorumReplies out;
+    out.targets = preference_list(key);
+    if (out.targets.empty()) return out;
+    const std::size_t needed = effective_quorum(config_.read_quorum, out.targets.size());
 
     struct State {
         std::mutex mutex;
@@ -314,8 +327,8 @@ ReadResult Cluster::read(const std::string& key) {
         std::vector<bool> replied;
     };
     auto state = std::make_shared<State>();
-    state->values.resize(targets.size());
-    state->replied.resize(targets.size(), false);
+    state->values.resize(out.targets.size());
+    state->replied.resize(out.targets.size(), false);
 
     auto record = [state](std::size_t i, bool ok, std::optional<VersionedValue> value) {
         std::lock_guard lock(state->mutex);
@@ -328,8 +341,8 @@ ReadResult Cluster::read(const std::string& key) {
         state->cv.notify_all();
     };
 
-    for (std::size_t i = 0; i < targets.size(); ++i) {
-        const auto& node = targets[i];
+    for (std::size_t i = 0; i < out.targets.size(); ++i) {
+        const auto& node = out.targets[i];
         if (node.id == local_node_.id) {
             record(i, true, local_cache_.get_versioned(key));
         } else if (!is_node_healthy(node.id)) {
@@ -351,34 +364,60 @@ ReadResult Cluster::read(const std::string& key) {
         }
     }
 
-    std::vector<std::optional<VersionedValue>> values;
-    std::vector<bool> replied;
-    {
-        std::unique_lock lock(state->mutex);
-        state->cv.wait_for(lock, config_.rpc_timeout * 2, [&]() {
-            return state->replies >= needed || state->done == targets.size();
-        });
-        if (state->replies < needed) return {};
-        values = state->values;
-        replied = state->replied;
+    std::unique_lock lock(state->mutex);
+    state->cv.wait_for(lock, config_.rpc_timeout * 2, [&]() {
+        return state->replies >= needed || state->done == out.targets.size();
+    });
+    out.ok = state->replies >= needed;
+    out.values = state->values;
+    out.replied = state->replied;
+    return out;
+}
+
+ReadResult Cluster::read(const std::string& key) {
+    auto to_result = [](std::optional<VersionedValue>&& v) {
+        if (!v.has_value() || v->tombstone) return ReadResult{ReadStatus::NotFound, {}};
+        return ReadResult{ReadStatus::Found, std::move(v.value())};
+    };
+
+    // Fast path: this node's copy alone satisfies the read quorum.
+    if (can_serve_locally(key, false)) {
+        return to_result(local_cache_.get_versioned(key));
     }
+
+    auto replies = collect(key);
+    if (!replies.ok) return {};
+    const auto& targets = replies.targets;
 
     std::optional<VersionedValue> winner;
     for (std::size_t i = 0; i < targets.size(); ++i) {
-        if (replied[i] && values[i].has_value() && (!winner || newer(values[i].value(), winner.value()))) {
-            winner = values[i];
+        if (replies.replied[i] && replies.values[i].has_value() &&
+            (!winner || newer(replies.values[i].value(), winner.value()))) {
+            winner = replies.values[i];
+        }
+    }
+    if (!winner.has_value()) return to_result(std::move(winner));
+
+    clock_.observe(winner->version);
+    std::vector<CacheNode> stale;
+    std::size_t up_to_date = 0;
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        if (!replies.replied[i]) continue;
+        if (replies.values[i].has_value() && same_version(replies.values[i].value(), winner.value())) {
+            ++up_to_date;
+        } else {
+            stale.push_back(targets[i]);
         }
     }
 
-    if (winner.has_value()) {
-        clock_.observe(winner->version);
-        std::vector<CacheNode> stale;
-        for (std::size_t i = 0; i < targets.size(); ++i) {
-            if (replied[i] && (!values[i].has_value() || !same_version(values[i].value(), winner.value()))) {
-                stale.push_back(targets[i]);
-            }
-        }
-        if (!stale.empty()) read_repair(key, winner.value(), stale);
+    const std::size_t write_quorum = effective_quorum(config_.write_quorum, targets.size());
+    if (config_.consistency == Consistency::Linearizable && up_to_date < write_quorum) {
+        // ABD read phase 2: the winner may come from a write still in flight.
+        // Before returning it, make sure a write quorum stores it, so that no
+        // later read can observe an older value.
+        if (!replicate(key, winner.value()).ok) return {};
+    } else if (!stale.empty()) {
+        read_repair(key, winner.value(), stale);
     }
     return to_result(std::move(winner));
 }

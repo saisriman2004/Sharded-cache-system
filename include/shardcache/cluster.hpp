@@ -23,6 +23,18 @@ namespace shardcache {
 
 namespace network { class PeerPool; }
 
+enum class Consistency {
+    // R/W quorums with last-writer-wins and asynchronous read repair. Fast,
+    // but not linearizable: a read can return a value from a write still in
+    // flight and a later read an older one (see docs/consistency.md).
+    Quorum,
+    // ABD-style: reads write the value they return back to a write quorum
+    // before replying, and writes first read the highest version from a read
+    // quorum. Linearizable while a quorum is reachable; costs up to one
+    // extra round trip per operation.
+    Linearizable,
+};
+
 struct ClusterConfig {
     // N: copies of each key, placed on consecutive distinct nodes of the ring.
     std::size_t replication_factor{3};
@@ -38,6 +50,7 @@ struct ClusterConfig {
     std::chrono::milliseconds health_check_interval{1000};
     std::size_t rpc_threads{32};
     std::size_t max_hints_per_node{100000};
+    Consistency consistency{Consistency::Quorum};
 };
 
 enum class ReadStatus { Found, NotFound, Unavailable };
@@ -140,7 +153,18 @@ private:
         std::optional<std::chrono::steady_clock::time_point> deadline;
     };
 
+    struct QuorumReplies {
+        bool ok{false};  // at least R replicas answered
+        std::vector<CacheNode> targets;
+        std::vector<std::optional<VersionedValue>> values;
+        std::vector<bool> replied;
+    };
+
     void init_common();
+    // Queries every replica of `key` and waits for R replies.
+    QuorumReplies collect(const std::string& key);
+    // Version for a new write; nullopt if the version query found no quorum.
+    std::optional<uint64_t> next_version(const std::string& key);
     // Routing snapshot for the calling thread; refreshed only when membership
     // changes, so the request path takes no lock.
     const RoutingTable& routing() const;

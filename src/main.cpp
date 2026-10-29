@@ -56,6 +56,7 @@ int main(int argc, char* argv[]) {
 
     shardcache::Logger::instance().info("Starting ShardCache Distributed Engine [Node: " + node_id + ", Port: " + std::to_string(port) + ", Advertise: " + advertise_host + "]...");
 
+
     auto env_size = [](const char* name, std::size_t fallback) {
         const char* v = std::getenv(name);
         return v ? static_cast<std::size_t>(std::max(0, std::atoi(v))) : fallback;
@@ -65,6 +66,15 @@ int main(int argc, char* argv[]) {
     config.read_quorum = env_size("READ_QUORUM", 0);
     config.write_quorum = env_size("WRITE_QUORUM", 0);
     config.cache_capacity = env_size("CACHE_CAPACITY", 1000000);
+    if (const char* mode = std::getenv("CONSISTENCY")) {
+        std::string m = mode;
+        if (m == "linearizable") {
+            config.consistency = shardcache::Consistency::Linearizable;
+        } else if (m != "quorum") {
+            shardcache::Logger::instance().error("Unknown CONSISTENCY '" + m + "' (expected quorum or linearizable)");
+            return 1;
+        }
+    }
 
     shardcache::CacheNode local_node{node_id, advertise_host, port};
     shardcache::Cluster cluster(local_node, config);
