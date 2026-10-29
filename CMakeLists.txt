@@ -33,6 +33,7 @@ add_library(shardcache_lib
   src/lru.cpp
   src/ttl_manager.cpp
   src/consistent_hash.cpp
+  src/routing_table.cpp
   src/cluster.cpp
   src/health_checker.cpp
   src/single_flight.cpp

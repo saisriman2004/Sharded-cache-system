@@ -24,7 +24,33 @@ bool same_version(const VersionedValue& a, const VersionedValue& b) {
     return a.version == b.version && a.tombstone == b.tombstone && a.value == b.value;
 }
 
+// Epochs are unique across all Cluster instances, so a thread's cached table
+// can never be mistaken for another cluster's.
+std::atomic<uint64_t> g_routing_epoch{0};
+
+struct ThreadRouting {
+    uint64_t epoch{0};
+    std::shared_ptr<const RoutingTable> table;
+};
+thread_local ThreadRouting t_routing;
+
 } // namespace
+
+const RoutingTable& Cluster::routing() const {
+    if (t_routing.epoch != routing_epoch_.load(std::memory_order_acquire)) {
+        std::lock_guard lock(routing_mutex_);
+        t_routing.table = routing_;
+        t_routing.epoch = routing_epoch_.load(std::memory_order_relaxed);
+    }
+    return *t_routing.table;
+}
+
+void Cluster::publish_routing_locked() {
+    auto table = std::make_shared<const RoutingTable>(ring_, config_.replication_factor, local_node_.id);
+    std::lock_guard lock(routing_mutex_);
+    routing_ = std::move(table);
+    routing_epoch_.store(g_routing_epoch.fetch_add(1) + 1, std::memory_order_release);
+}
 
 void Cluster::init_common() {
     health_checker_ = std::make_unique<HealthChecker>([this](const std::string& node_id, bool healthy) {
@@ -34,6 +60,7 @@ void Cluster::init_common() {
     ring_.add_node(local_node_);
     nodes_[local_node_.id] = local_node_;
     node_health_[local_node_.id] = true;
+    publish_routing_locked();
 }
 
 Cluster::Cluster(const CacheNode& local_node, ClusterConfig config)
@@ -85,6 +112,7 @@ void Cluster::add_node(const CacheNode& node) {
         nodes_[node.id] = node;
         ring_.add_node(node);
         node_health_[node.id] = true;
+        publish_routing_locked();
     }
     if (node.id != local_node_.id) {
         health_checker_->add_node(node);
@@ -97,18 +125,17 @@ void Cluster::remove_node(const std::string& node_id) {
         ring_.remove_node(node_id);
         nodes_.erase(node_id);
         node_health_.erase(node_id);
+        publish_routing_locked();
     }
     health_checker_->remove_node(node_id);
 }
 
 std::size_t Cluster::node_count() const {
-    std::shared_lock lock(membership_mutex_);
-    return ring_.node_count();
+    return routing().node_count();
 }
 
 std::vector<CacheNode> Cluster::preference_list(const std::string& key) const {
-    std::shared_lock lock(membership_mutex_);
-    return ring_.locate_replicas(key, config_.replication_factor);
+    return routing().preference_list(key);
 }
 
 std::optional<CacheNode> Cluster::locate(const std::string& key) const {
@@ -163,12 +190,13 @@ std::size_t Cluster::effective_quorum(std::size_t configured, std::size_t replic
 }
 
 bool Cluster::can_serve_locally(const std::string& key, bool is_write) const {
-    auto targets = preference_list(key);
-    bool local_is_replica = std::any_of(targets.begin(), targets.end(),
-                                        [&](const CacheNode& n) { return n.id == local_node_.id; });
-    if (!local_is_replica) return false;
-    if (is_write) return targets.size() == 1;
-    return effective_quorum(config_.read_quorum, targets.size()) == 1;
+    const auto& table = routing();
+    if (table.empty()) return false;
+    const std::size_t point = table.point_for(key);
+    if (!table.local_is_replica(point)) return false;
+    const std::size_t replicas = table.replicas(point).size();
+    if (is_write) return replicas == 1;
+    return effective_quorum(config_.read_quorum, replicas) == 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +217,11 @@ bool Cluster::send_write(const CacheNode& node, const std::string& key, const Ve
 }
 
 WriteResult Cluster::replicate(const std::string& key, const VersionedValue& v) {
+    if (can_serve_locally(key, true)) {
+        bool live = false;
+        local_cache_.apply(key, v, &live);
+        return WriteResult{true, live, 1};
+    }
     const auto targets = preference_list(key);
     if (targets.empty()) return {};
     const std::size_t needed = effective_quorum(config_.write_quorum, targets.size());
@@ -258,19 +291,19 @@ WriteResult Cluster::expire_key(const std::string& key, std::chrono::millisecond
 // Reads
 
 ReadResult Cluster::read(const std::string& key) {
-    const auto targets = preference_list(key);
-    if (targets.empty()) return {};
-    const std::size_t needed = effective_quorum(config_.read_quorum, targets.size());
-
-    auto to_result = [](const std::optional<VersionedValue>& v) {
+    auto to_result = [](std::optional<VersionedValue>&& v) {
         if (!v.has_value() || v->tombstone) return ReadResult{ReadStatus::NotFound, {}};
-        return ReadResult{ReadStatus::Found, v.value()};
+        return ReadResult{ReadStatus::Found, std::move(v.value())};
     };
 
     // Fast path: this node's copy alone satisfies the read quorum.
-    if (needed == 1 && can_serve_locally(key, false)) {
+    if (can_serve_locally(key, false)) {
         return to_result(local_cache_.get_versioned(key));
     }
+
+    const auto targets = preference_list(key);
+    if (targets.empty()) return {};
+    const std::size_t needed = effective_quorum(config_.read_quorum, targets.size());
 
     struct State {
         std::mutex mutex;
@@ -347,7 +380,7 @@ ReadResult Cluster::read(const std::string& key) {
         }
         if (!stale.empty()) read_repair(key, winner.value(), stale);
     }
-    return to_result(winner);
+    return to_result(std::move(winner));
 }
 
 void Cluster::read_repair(const std::string& key, const VersionedValue& winner, const std::vector<CacheNode>& stale) {

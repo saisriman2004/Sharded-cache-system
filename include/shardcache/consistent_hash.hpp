@@ -32,6 +32,7 @@ public:
 
     [[nodiscard]] std::size_t node_count() const { return physical_nodes_.size(); }
     [[nodiscard]] std::size_t ring_size() const { return ring_.size(); }
+    [[nodiscard]] const std::map<uint32_t, CacheNode>& points() const { return ring_; }
 
     static uint32_t hash_fn(const std::string& key);
 

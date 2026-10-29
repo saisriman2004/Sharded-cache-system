@@ -5,6 +5,7 @@
 #include "shardcache/sharded_cache.hpp"
 #include "shardcache/health_checker.hpp"
 #include "shardcache/hybrid_clock.hpp"
+#include "shardcache/routing_table.hpp"
 
 #include <boost/asio/thread_pool.hpp>
 
@@ -140,6 +141,10 @@ private:
     };
 
     void init_common();
+    // Routing snapshot for the calling thread; refreshed only when membership
+    // changes, so the request path takes no lock.
+    const RoutingTable& routing() const;
+    void publish_routing_locked();
     WriteResult replicate(const std::string& key, const VersionedValue& v);
     bool send_write(const CacheNode& node, const std::string& key, const VersionedValue& v, bool* was_live);
     void read_repair(const std::string& key, const VersionedValue& winner, const std::vector<CacheNode>& stale);
@@ -157,6 +162,10 @@ private:
     std::unordered_map<std::string, CacheNode> nodes_;
     std::unordered_map<std::string, bool> node_health_;
     mutable std::shared_mutex membership_mutex_;
+
+    mutable std::mutex routing_mutex_;
+    std::shared_ptr<const RoutingTable> routing_;
+    std::atomic<uint64_t> routing_epoch_{0};
 
     mutable std::mutex hints_mutex_;
     std::unordered_map<std::string, std::deque<Hint>> hints_;
