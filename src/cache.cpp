@@ -5,15 +5,14 @@ namespace shardcache {
 Cache::Cache(std::size_t capacity)
     : capacity_(capacity) {}
 
-void Cache::move_to_front_unsafe(std::list<Node>::iterator it) {
-    lru_list_.splice(lru_list_.begin(), lru_list_, it);
+void Cache::erase_unsafe(std::list<Node>::iterator it) {
+    entries_.erase(it->key);
+    lru_list_.erase(it);
 }
 
 void Cache::evict_lru_unsafe() {
     if (lru_list_.empty()) return;
-    auto last_it = std::prev(lru_list_.end());
-    entries_.erase(last_it->key);
-    lru_list_.pop_back();
+    erase_unsafe(std::prev(lru_list_.end()));
     metrics_.evictions.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -22,53 +21,64 @@ void Cache::set(
     const std::string& value,
     std::optional<std::chrono::seconds> ttl
 ) {
-    std::unique_lock lock(mutex_);
-
-    metrics_.sets.fetch_add(1, std::memory_order_relaxed);
-
-    auto now = std::chrono::steady_clock::now();
     std::optional<std::chrono::steady_clock::time_point> expires_at = std::nullopt;
     if (ttl.has_value()) {
-        expires_at = now + ttl.value();
+        expires_at = std::chrono::steady_clock::now() + ttl.value();
     }
+
+    std::unique_lock lock(mutex_);
+    metrics_.sets.fetch_add(1, std::memory_order_relaxed);
 
     auto it = entries_.find(key);
     if (it != entries_.end()) {
         it->second->entry.value = value;
         it->second->entry.expires_at = expires_at;
-        move_to_front_unsafe(it->second);
+        lru_list_.splice(lru_list_.begin(), lru_list_, it->second);
         return;
     }
 
-    lru_list_.push_front(Node{key, CacheEntry{value, expires_at}});
-    entries_[key] = lru_list_.begin();
-
-    if (capacity_ > 0 && entries_.size() > capacity_) {
+    if (capacity_ > 0 && entries_.size() >= capacity_) {
         evict_lru_unsafe();
     }
+
+    lru_list_.emplace_front(key, CacheEntry{value, expires_at});
+    entries_.emplace(key, lru_list_.begin());
 }
 
 std::optional<std::string> Cache::get(const std::string& key) {
+    const auto now = std::chrono::steady_clock::now();
+    const int64_t now_ticks = now.time_since_epoch().count();
+    std::optional<std::string> value;
+    {
+        std::shared_lock lock(mutex_);
+
+        auto it = entries_.find(key);
+        if (it == entries_.end() || it->second->entry.is_expired(now)) {
+            // Expired entries are reclaimed by writers or the active TTL sweep,
+            // which keeps the read path free of exclusive locking.
+            metrics_.misses.fetch_add(1, std::memory_order_relaxed);
+            return std::nullopt;
+        }
+
+        metrics_.hits.fetch_add(1, std::memory_order_relaxed);
+        value = it->second->entry.value;
+
+        const int64_t last = it->second->last_promoted.load(std::memory_order_relaxed);
+        const auto interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(kPromoteInterval).count();
+        if (last != 0 && now_ticks - last < interval) {
+            return value;
+        }
+    }
+
+    // Slow path: promote under the exclusive lock. The entry may have been
+    // removed or replaced since the shared lock was released, so look it up again.
     std::unique_lock lock(mutex_);
-
     auto it = entries_.find(key);
-    if (it == entries_.end()) {
-        metrics_.misses.fetch_add(1, std::memory_order_relaxed);
-        return std::nullopt;
+    if (it != entries_.end()) {
+        lru_list_.splice(lru_list_.begin(), lru_list_, it->second);
+        it->second->last_promoted.store(now_ticks, std::memory_order_relaxed);
     }
-
-    auto now = std::chrono::steady_clock::now();
-    if (it->second->entry.is_expired(now)) {
-        lru_list_.erase(it->second);
-        entries_.erase(it);
-        metrics_.expirations.fetch_add(1, std::memory_order_relaxed);
-        metrics_.misses.fetch_add(1, std::memory_order_relaxed);
-        return std::nullopt;
-    }
-
-    move_to_front_unsafe(it->second);
-    metrics_.hits.fetch_add(1, std::memory_order_relaxed);
-    return it->second->entry.value;
+    return value;
 }
 
 bool Cache::remove(const std::string& key) {
@@ -79,29 +89,17 @@ bool Cache::remove(const std::string& key) {
         return false;
     }
 
-    lru_list_.erase(it->second);
-    entries_.erase(it);
+    bool was_live = !it->second->entry.is_expired();
+    erase_unsafe(it->second);
     metrics_.deletes.fetch_add(1, std::memory_order_relaxed);
-    return true;
+    return was_live;
 }
 
 bool Cache::contains(const std::string& key) {
-    std::unique_lock lock(mutex_);
+    std::shared_lock lock(mutex_);
 
     auto it = entries_.find(key);
-    if (it == entries_.end()) {
-        return false;
-    }
-
-    auto now = std::chrono::steady_clock::now();
-    if (it->second->entry.is_expired(now)) {
-        lru_list_.erase(it->second);
-        entries_.erase(it);
-        metrics_.expirations.fetch_add(1, std::memory_order_relaxed);
-        return false;
-    }
-
-    return true;
+    return it != entries_.end() && !it->second->entry.is_expired();
 }
 
 std::size_t Cache::size() const {
@@ -128,8 +126,7 @@ bool Cache::expire(const std::string& key, std::chrono::seconds ttl) {
     }
     auto now = std::chrono::steady_clock::now();
     if (it->second->entry.is_expired(now)) {
-        lru_list_.erase(it->second);
-        entries_.erase(it);
+        erase_unsafe(it->second);
         metrics_.expirations.fetch_add(1, std::memory_order_relaxed);
         return false;
     }

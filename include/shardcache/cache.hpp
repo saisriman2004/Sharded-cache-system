@@ -66,13 +66,22 @@ public:
     void purge_expired();
 
 private:
+    // LRU with throttled promotion (as in memcached): a read moves an entry to
+    // the front at most once per kPromoteInterval, so repeated reads of hot
+    // keys are served entirely under the shared lock.
+    static constexpr std::chrono::milliseconds kPromoteInterval{100};
+
     struct Node {
+        Node(std::string k, CacheEntry e) : key(std::move(k)), entry(std::move(e)) {}
+
         std::string key;
         CacheEntry entry;
+        // steady_clock ticks of the last promotion; 0 means never promoted.
+        std::atomic<int64_t> last_promoted{0};
     };
 
-    void move_to_front_unsafe(std::list<Node>::iterator it);
     void evict_lru_unsafe();
+    void erase_unsafe(std::list<Node>::iterator it);
 
     std::size_t capacity_;
     mutable std::shared_mutex mutex_;
