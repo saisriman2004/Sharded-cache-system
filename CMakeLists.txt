@@ -45,6 +45,7 @@ add_library(shardcache_lib
   network/session.cpp
   network/tcp_server.cpp
   network/client.cpp
+  network/peer_pool.cpp
 )
 
 target_include_directories(shardcache_lib PUBLIC 

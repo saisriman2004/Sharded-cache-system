@@ -1,14 +1,20 @@
 #include "shardcache/replication.hpp"
 #include "shardcache/logger.hpp"
-#include "network/client.hpp"
+#include "network/peer_pool.hpp"
 
 namespace shardcache {
 
 ReplicationManager::ReplicationManager(ReplicationMode mode)
-    : local_node_id_(""), mode_(mode) {}
+    : ReplicationManager("", mode) {}
 
-ReplicationManager::ReplicationManager(const std::string& local_node_id, ReplicationMode mode)
-    : local_node_id_(local_node_id), mode_(mode) {}
+ReplicationManager::ReplicationManager(
+    const std::string& local_node_id,
+    ReplicationMode mode,
+    std::shared_ptr<network::PeerPool> peer_pool
+)
+    : local_node_id_(local_node_id),
+      mode_(mode),
+      peer_pool_(peer_pool ? std::move(peer_pool) : std::make_shared<network::PeerPool>()) {}
 
 bool ReplicationManager::replicate_set(
     const std::vector<CacheNode>& replicas,
@@ -23,13 +29,13 @@ bool ReplicationManager::replicate_set(
         if (!local_node_id_.empty() && node.id == local_node_id_) continue;
 
         Logger::instance().debug("Replicating SET for key '" + key + "' to node " + node.id + " (" + node.host + ":" + std::to_string(node.port) + ")");
-        network::Client client(node.host, node.port);
-        if (client.connect()) {
+        auto client = peer_pool_->acquire(node.host, node.port);
+        if (client) {
             std::optional<uint64_t> ttl_ms = std::nullopt;
             if (ttl.has_value()) {
                 ttl_ms = static_cast<uint64_t>(ttl.value().count());
             }
-            auto res = client.replica_set(key, value, ttl_ms);
+            auto res = (*client)->replica_set(key, value, ttl_ms);
             if (!res.is_ok()) {
                 Logger::instance().warning("Failed replication SET to replica node " + node.id + ": " + res.message);
                 all_ok = false;
@@ -53,9 +59,9 @@ bool ReplicationManager::replicate_delete(
         if (!local_node_id_.empty() && node.id == local_node_id_) continue;
 
         Logger::instance().debug("Replicating DELETE for key '" + key + "' to node " + node.id);
-        network::Client client(node.host, node.port);
-        if (client.connect()) {
-            auto res = client.replica_delete(key);
+        auto client = peer_pool_->acquire(node.host, node.port);
+        if (client) {
+            auto res = (*client)->replica_delete(key);
             if (!res.is_ok()) {
                 all_ok = false;
             }
@@ -78,9 +84,9 @@ bool ReplicationManager::replicate_expire(
         if (!local_node_id_.empty() && node.id == local_node_id_) continue;
 
         Logger::instance().debug("Replicating EXPIRE for key '" + key + "' to node " + node.id);
-        network::Client client(node.host, node.port);
-        if (client.connect()) {
-            auto res = client.replica_expire(key, static_cast<uint64_t>(ttl.count()));
+        auto client = peer_pool_->acquire(node.host, node.port);
+        if (client) {
+            auto res = (*client)->replica_expire(key, static_cast<uint64_t>(ttl.count()));
             if (!res.is_ok()) {
                 all_ok = false;
             }

@@ -1,6 +1,6 @@
 #include "shardcache/cluster.hpp"
 #include "shardcache/logger.hpp"
-#include "network/client.hpp"
+#include "network/peer_pool.hpp"
 
 namespace shardcache {
 
@@ -9,6 +9,9 @@ void Cluster::init_common() {
     health_checker_ = std::make_unique<HealthChecker>([this](const std::string& node_id, bool healthy) {
         std::unique_lock lock(membership_mutex_);
         node_health_[node_id] = healthy;
+        if (auto it = nodes_.find(node_id); !healthy && it != nodes_.end()) {
+            peer_pool_->drop(it->second.host, it->second.port);
+        }
         if (!healthy) {
             Logger::instance().warning("Node " + node_id + " marked unhealthy in cluster routing.");
         } else {
@@ -24,18 +27,20 @@ void Cluster::init_common() {
 Cluster::Cluster(const CacheNode& local_node, std::size_t replication_factor, std::size_t cache_capacity)
     : local_node_(local_node),
       replication_factor_(replication_factor),
+      peer_pool_(std::make_shared<network::PeerPool>()),
       ring_(100),
       local_cache_(cache_capacity, 16),
-      replication_mgr_(local_node.id, ReplicationMode::Sync) {
+      replication_mgr_(local_node.id, ReplicationMode::Sync, peer_pool_) {
     init_common();
 }
 
 Cluster::Cluster(const std::string& local_node_id, std::size_t replication_factor, std::size_t cache_capacity)
     : local_node_{local_node_id, "127.0.0.1", 7001},
       replication_factor_(replication_factor),
+      peer_pool_(std::make_shared<network::PeerPool>()),
       ring_(100),
       local_cache_(cache_capacity, 16),
-      replication_mgr_(local_node_id, ReplicationMode::Sync) {
+      replication_mgr_(local_node_id, ReplicationMode::Sync, peer_pool_) {
     init_common();
 }
 
@@ -150,13 +155,13 @@ bool Cluster::set(
     }
 
     Logger::instance().debug("Forwarding SET key '" + key + "' to primary node " + primary->id + " (" + primary->host + ":" + std::to_string(primary->port) + ")");
-    network::Client client(primary->host, primary->port);
-    if (client.connect()) {
+    auto client = peer_pool_->acquire(primary->host, primary->port);
+    if (client) {
         std::optional<uint64_t> ttl_ms = std::nullopt;
         if (ttl.has_value()) {
             ttl_ms = static_cast<uint64_t>(ttl.value().count());
         }
-        auto res = client.set(key, value, ttl_ms);
+        auto res = (*client)->set(key, value, ttl_ms);
         return res.is_ok();
     }
 
@@ -176,9 +181,9 @@ std::optional<std::string> Cluster::get(const std::string& key) {
     }
 
     Logger::instance().debug("Forwarding GET key '" + key + "' to target node " + target->id + " (" + target->host + ":" + std::to_string(target->port) + ")");
-    network::Client client(target->host, target->port);
-    if (client.connect()) {
-        auto res = client.get(key);
+    auto client = peer_pool_->acquire(target->host, target->port);
+    if (client) {
+        auto res = (*client)->get(key);
         if (res.is_ok()) {
             return res.value;
         }
@@ -218,9 +223,9 @@ bool Cluster::remove(const std::string& key) {
         return removed;
     }
 
-    network::Client client(primary->host, primary->port);
-    if (client.connect()) {
-        auto res = client.remove(key);
+    auto client = peer_pool_->acquire(primary->host, primary->port);
+    if (client) {
+        auto res = (*client)->remove(key);
         return res.is_ok();
     }
 
@@ -249,9 +254,9 @@ bool Cluster::expire(const std::string& key, std::chrono::milliseconds ttl) {
         return ok;
     }
 
-    network::Client client(primary->host, primary->port);
-    if (client.connect()) {
-        auto res = client.expire(key, static_cast<uint64_t>(ttl.count()));
+    auto client = peer_pool_->acquire(primary->host, primary->port);
+    if (client) {
+        auto res = (*client)->expire(key, static_cast<uint64_t>(ttl.count()));
         return res.is_ok();
     }
 
@@ -265,9 +270,9 @@ int64_t Cluster::pttl(const std::string& key) {
         return local_cache_.pttl(key);
     }
 
-    network::Client client(target->host, target->port);
-    if (client.connect()) {
-        auto res = client.pttl(key);
+    auto client = peer_pool_->acquire(target->host, target->port);
+    if (client) {
+        auto res = (*client)->pttl(key);
         if (res.is_ok() && res.value.has_value()) {
             return res.value.value();
         }

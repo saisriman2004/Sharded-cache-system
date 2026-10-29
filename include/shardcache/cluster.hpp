@@ -12,6 +12,8 @@
 
 namespace shardcache {
 
+namespace network { class PeerPool; }
+
 class Cluster {
 public:
     /// Construct a cluster node with explicit identity.
@@ -75,6 +77,7 @@ private:
 
     CacheNode local_node_;
     std::size_t replication_factor_;
+    std::shared_ptr<network::PeerPool> peer_pool_;
     ConsistentHashRing ring_;
     ShardedCache local_cache_;
     ReplicationManager replication_mgr_;

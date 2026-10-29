@@ -6,8 +6,11 @@
 #include <vector>
 #include <optional>
 #include <chrono>
+#include <memory>
 
 namespace shardcache {
+
+namespace network { class PeerPool; }
 
 enum class ReplicationMode {
     Sync,
@@ -19,7 +22,8 @@ public:
     explicit ReplicationManager(ReplicationMode mode = ReplicationMode::Sync);
     explicit ReplicationManager(
         const std::string& local_node_id,
-        ReplicationMode mode = ReplicationMode::Sync
+        ReplicationMode mode = ReplicationMode::Sync,
+        std::shared_ptr<network::PeerPool> peer_pool = nullptr
     );
     ~ReplicationManager() = default;
 
@@ -46,6 +50,7 @@ public:
 private:
     std::string local_node_id_;
     ReplicationMode mode_;
+    std::shared_ptr<network::PeerPool> peer_pool_;
 };
 
 } // namespace shardcache
