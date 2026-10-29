@@ -38,6 +38,7 @@ add_library(shardcache_lib
   src/health_checker.cpp
   src/single_flight.cpp
   src/sharded_cache.cpp
+  src/snapshot.cpp
   src/logger.cpp
   protocol/parser.cpp
   protocol/resp.cpp
@@ -91,6 +92,7 @@ if(BUILD_TESTING)
     tests/protocol_test.cpp
     tests/network_test.cpp
     tests/versioning_test.cpp
+    tests/snapshot_test.cpp
   )
 
   target_include_directories(cache_test PRIVATE

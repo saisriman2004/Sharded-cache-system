@@ -3,6 +3,10 @@
 #include "tcp_server.hpp"
 #include "io_context_pool.hpp"
 #include "metrics_server.hpp"
+#include "shardcache/snapshot.hpp"
+
+#include <condition_variable>
+#include <mutex>
 
 #include <iostream>
 #include <sstream>
@@ -109,6 +113,55 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Optional persistence: restore the last snapshot before serving, then
+    // write one every SNAPSHOT_INTERVAL_SEC and at shutdown.
+    std::string snapshot_path;
+    if (const char* env = std::getenv("SNAPSHOT_PATH")) snapshot_path = env;
+    int snapshot_interval = 60;
+    if (const char* env = std::getenv("SNAPSHOT_INTERVAL_SEC")) snapshot_interval = std::max(1, std::atoi(env));
+    auto save_snapshot = [&]() {
+        std::string error;
+        auto start = std::chrono::steady_clock::now();
+        if (auto stats = shardcache::save_snapshot(cluster.local_cache(), snapshot_path, &error)) {
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+            shardcache::Logger::instance().info("Snapshot saved: " + std::to_string(stats->entries) + " entries, " +
+                                                std::to_string(stats->bytes) + " bytes in " + std::to_string(ms) + "ms");
+        } else {
+            shardcache::Logger::instance().error("Snapshot failed: " + error);
+        }
+    };
+    if (!snapshot_path.empty()) {
+        std::string error;
+        if (auto stats = shardcache::load_snapshot(cluster.local_cache(), snapshot_path, &error)) {
+            shardcache::Logger::instance().info("Restored " + std::to_string(stats->entries) + " entries from " + snapshot_path);
+        } else {
+            shardcache::Logger::instance().warning("Starting without snapshot: " + error);
+        }
+    }
+    std::mutex snapshot_mutex;
+    std::condition_variable snapshot_cv;
+    bool snapshot_stop = false;
+    std::thread snapshot_thread;
+    if (!snapshot_path.empty()) {
+        snapshot_thread = std::thread([&]() {
+            std::unique_lock lock(snapshot_mutex);
+            while (!snapshot_cv.wait_for(lock, std::chrono::seconds(snapshot_interval), [&]() { return snapshot_stop; })) {
+                lock.unlock();
+                save_snapshot();
+                lock.lock();
+            }
+        });
+    }
+    auto stop_snapshots = [&]() {
+        if (!snapshot_thread.joinable()) return;
+        {
+            std::lock_guard lock(snapshot_mutex);
+            snapshot_stop = true;
+        }
+        snapshot_cv.notify_all();
+        snapshot_thread.join();
+    };
+
     cluster.start();
 
     try {
@@ -135,9 +188,15 @@ int main(int argc, char* argv[]) {
         boost::asio::signal_set signals(accept_context, SIGINT, SIGTERM);
         signals.async_wait([&](const boost::system::error_code& ec, int /*signo*/) {
             if (ec) return;
+            stop_snapshots();
             const char* leave = std::getenv("LEAVE_ON_SHUTDOWN");
             if (!leave || std::string(leave) != "0") {
                 cluster.leave();
+                // Our data now lives on other nodes; a stale snapshot must not
+                // be replayed if this node is started again later.
+                if (!snapshot_path.empty()) std::remove(snapshot_path.c_str());
+            } else if (!snapshot_path.empty()) {
+                save_snapshot();
             }
             cluster.stop();
             io_pool.stop();
@@ -147,6 +206,7 @@ int main(int argc, char* argv[]) {
         io_pool.start();
         accept_context.run();
         io_pool.join();
+        stop_snapshots();
     } catch (const std::exception& e) {
         shardcache::Logger::instance().error("Fatal server error: " + std::string(e.what()));
         return 1;
