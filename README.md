@@ -32,7 +32,8 @@ redis-cli -p 7003 GET user:42                           # any node serves any ke
 - **Elastic.** Nodes join through any seed by gossip, data streams to new
   owners automatically, and `SIGTERM` hands a node's data off before it
   exits (883 keys rebalanced in 44 ms).
-- **Operable.** Prometheus `/metrics` and `/health`, a Grafana dashboard,
+- **Operable.** Prometheus `/metrics` and `/health`, a Grafana dashboard
+  ([live failure demo](#a-node-failure-live)),
   versioned snapshots for crash recovery, Docker Compose and a Kubernetes
   StatefulSet.
 - **Engineered by measurement.** Each optimization was profiled and A/B
@@ -53,6 +54,40 @@ redis-cli -p 7003 GET user:42                           # any node serves any ke
 
 How a request flows, placement, replication, membership and the trade-offs
 are covered in [docs/design.md](docs/design.md).
+
+## A node failure, live
+
+The Docker Compose stack under a steady 1:4 SET:GET memtier load (one
+load generator per node, 50K keys) while node-c is killed, restarted,
+gracefully stopped and rejoined. Everything below comes from the bundled
+Grafana dashboard.
+
+![ShardCache Grafana dashboard during a kill, restart, leave and rejoin of node-c](docs/images/grafana-dashboard.png)
+
+| Time | Event | What the cluster did |
+|---|---|---|
+| 02:08:33 | `docker compose kill node-c` (SIGKILL) | Healthy nodes 3 → 2 after three missed health checks; **0 failed writes** and 0 quorum failures, since node-a and node-b still form R=W=2 quorums |
+| 02:09:34 | node-c restarted, empty | 134K hinted writes replayed to it; 47.6K were dropped because the queue hit its 100K-per-node cap, and read repair fixes those keys as they are read |
+| 02:11:24 | `docker compose stop node-c` (SIGTERM) | Graceful leave: node-c hands its data off and the ring shrinks to 2 |
+| 02:12:10 | node-c rejoins via seed | **108,882 keys rebalanced in 2.7 s**; keys per node back to 50K |
+
+The ops/s line for node-c drops to zero at the kill because its own load
+generator disconnected. node-a and node-b kept serving without errors:
+
+![Ops/s per node: node-a and node-b keep serving after node-c is killed](docs/images/grafana-ops-by-node.png)
+
+Hinted handoff drains the writes node-c missed after it restarts:
+
+![Hints delivered and dropped after node-c restarts](docs/images/grafana-handoff.png)
+
+Rebalancing streams keys back to node-c when it rejoins:
+
+![Keys moved per second during restart and rejoin](docs/images/grafana-recovery.png)
+
+To reproduce: `docker compose up --build`, run `memtier_benchmark
+--protocol=redis -p 700{1,2,3} --ratio=1:4 --key-maximum=50000
+--test-time=900` against each node, open <http://localhost:3000>, then
+`docker compose kill node-c` / `start` / `stop` / `start`.
 
 ## Quick start
 
