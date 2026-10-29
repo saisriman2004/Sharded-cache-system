@@ -24,11 +24,18 @@ trap 'kill $(jobs -p) 2>/dev/null || true; rm -rf "$TMP"' EXIT
 PORTS=(7401 7402 7403)
 PEERS="nodeA:127.0.0.1:7401,nodeB:127.0.0.1:7402,nodeC:127.0.0.1:7403"
 
+for port in "${PORTS[@]}"; do
+  if nc -z 127.0.0.1 "$port" 2>/dev/null; then
+    echo "port $port is already in use; stop whatever is listening there first" >&2
+    exit 1
+  fi
+done
+
 start_cluster() {
   local ids=(nodeA nodeB nodeC)
   for i in 0 1 2; do
     NODE_ID=${ids[$i]} PORT=${PORTS[$i]} CLUSTER_PEERS="$PEERS" LOG_LEVEL=warn IO_THREADS=2 \
-      REPLICATION_FACTOR=$1 READ_QUORUM=$2 WRITE_QUORUM=$3 \
+      REPLICATION_FACTOR=$1 READ_QUORUM=$2 WRITE_QUORUM=$3 CONSISTENCY=$4 \
       "$ROOT/$BUILD_DIR/shardcache_app" > "$TMP/node$i.log" 2>&1 &
   done
   for p in "${PORTS[@]}"; do
@@ -48,14 +55,15 @@ stop_cluster() {
   echo "- Machine: $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m), $(sysctl -n hw.ncpu 2>/dev/null || nproc) cores (all nodes and clients share it)"
   echo "- Load: one memtier_benchmark per node, each $THREADS threads x $CLIENTS connections, SET:GET $RATIO, $KEYS keys, ${VALUE_SIZE}B values, ${DURATION}s"
   echo
-  echo "| N | R | W | Guarantee | Ops/sec (sum) | Avg p50 (ms) | Worst p99 (ms) |"
-  echo "|---|---|---|---|---:|---:|---:|"
+  echo "| N | R | W | Mode | Guarantee | Ops/sec (sum) | Avg p50 (ms) | Worst p99 (ms) |"
+  echo "|---|---|---|---|---|---:|---:|---:|"
 } > "$REPORT"
 
-for cfg in "3 2 2 quorum (R+W>N)" "3 1 3 read-one/write-all" "3 1 1 eventual" "1 1 1 no replication"; do
-  read -r n r w label <<< "$cfg"
-  echo "Running N=$n R=$r W=$w" >&2
-  start_cluster "$n" "$r" "$w"
+for cfg in "3 2 2 linearizable linearizable (ABD)" "3 2 2 quorum quorum (R+W>N)" "3 1 3 quorum read-one/write-all" \
+           "3 1 1 quorum eventual" "1 1 1 quorum no replication"; do
+  read -r n r w mode label <<< "$cfg"
+  echo "Running N=$n R=$r W=$w $mode" >&2
+  start_cluster "$n" "$r" "$w" "$mode"
   for i in 0 1 2; do
     memtier_benchmark -s 127.0.0.1 -p "${PORTS[$i]}" --protocol=redis -t "$THREADS" -c "$CLIENTS" \
       --test-time="$DURATION" --ratio="$RATIO" --key-pattern=R:R --key-maximum="$KEYS" \
@@ -64,7 +72,7 @@ for cfg in "3 2 2 quorum (R+W>N)" "3 1 3 read-one/write-all" "3 1 1 eventual" "1
   wait $(jobs -p | tail -3) 2>/dev/null || true
   stats=$(awk '/^Totals/ {ops += $2; p50 += $6; if ($7 > p99) p99 = $7} END {printf "%.0f %.3f %.3f", ops, p50 / 3, p99}' "$TMP"/memtier*.txt)
   read -r ops p50 p99 <<< "$stats"
-  printf "| %s | %s | %s | %s | %'d | %s | %s |\n" "$n" "$r" "$w" "$label" "$ops" "$p50" "$p99" >> "$REPORT"
+  printf "| %s | %s | %s | %s | %s | %'d | %s | %s |\n" "$n" "$r" "$w" "$mode" "$label" "$ops" "$p50" "$p99" >> "$REPORT"
   stop_cluster
 done
 

@@ -23,6 +23,15 @@ trap 'kill $(jobs -p) 2>/dev/null || true; rm -rf "$TMP"' EXIT
 
 SC_PORT=7301; REDIS_PORT=7302; MC_PORT=7303
 
+# A leftover process on one of our ports would silently be benchmarked
+# instead of the server we start, so refuse to run.
+for port in $SC_PORT $REDIS_PORT $MC_PORT; do
+  if nc -z 127.0.0.1 "$port" 2>/dev/null; then
+    echo "port $port is already in use; stop whatever is listening there first" >&2
+    exit 1
+  fi
+done
+
 wait_port() {
   for _ in $(seq 1 50); do nc -z 127.0.0.1 "$1" 2>/dev/null && return 0; sleep 0.1; done
   echo "server on port $1 did not start" >&2; exit 1
@@ -35,6 +44,9 @@ start_servers() {
     > "$TMP/redis.log" 2>&1 &
   memcached -p $MC_PORT -t $SERVER_THREADS -m 2048 -U 0 > "$TMP/memcached.log" 2>&1 &
   wait_port $SC_PORT; wait_port $REDIS_PORT; wait_port $MC_PORT
+  for pid in $(jobs -p); do
+    kill -0 "$pid" 2>/dev/null || { echo "a server exited during startup; logs in $TMP" >&2; exit 1; }
+  done
 }
 
 # memtier "Totals" row -> "ops/sec|avg ms|p50|p99|p99.9"
