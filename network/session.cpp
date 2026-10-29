@@ -36,6 +36,8 @@ void ClientSession::do_read() {
 }
 
 void ClientSession::process_input() {
+    if (awaiting_rpc_) return;
+
     std::size_t offset = 0;
     std::vector<std::string> args;
     std::string error;
@@ -57,6 +59,14 @@ void ClientSession::process_input() {
         }
 
         auto cmd = protocol::Parser::parse(args);
+        if (!handler_.runs_locally(cmd)) {
+            // Hand off to the RPC executor; pipelined commands behind this
+            // one stay buffered so replies keep their order.
+            awaiting_rpc_ = true;
+            input_.erase(0, offset);
+            run_remote(std::move(cmd));
+            return;
+        }
         handler_.execute(cmd, output_);
         if (cmd.type == protocol::CommandType::Quit) {
             closing_ = true;
@@ -65,6 +75,19 @@ void ClientSession::process_input() {
 
     input_.erase(0, offset);
     flush();
+}
+
+void ClientSession::run_remote(protocol::Command cmd) {
+    auto self(shared_from_this());
+    boost::asio::post(handler_.rpc_executor(), [this, self, cmd = std::move(cmd)]() {
+        auto reply = std::make_shared<std::string>();
+        handler_.execute(cmd, *reply);
+        boost::asio::post(socket_.get_executor(), [this, self, reply]() {
+            output_ += *reply;
+            awaiting_rpc_ = false;
+            process_input();
+        });
+    });
 }
 
 void ClientSession::flush() {

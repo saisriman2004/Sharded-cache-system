@@ -1,6 +1,7 @@
 #include "shardcache/cluster.hpp"
 #include "shardcache/logger.hpp"
 #include "tcp_server.hpp"
+#include "io_context_pool.hpp"
 
 #include <iostream>
 #include <sstream>
@@ -8,6 +9,7 @@
 #include <vector>
 #include <boost/asio.hpp>
 #include <cstdlib>
+#include <algorithm>
 
 int main(int argc, char* argv[]) {
     std::string node_id = "nodeA";
@@ -26,6 +28,20 @@ int main(int argc, char* argv[]) {
     }
     if (const char* env_peers = std::getenv("CLUSTER_PEERS")) {
         peers_str = env_peers;
+    }
+    std::size_t io_threads = std::max(1u, std::thread::hardware_concurrency());
+    if (const char* env = std::getenv("IO_THREADS")) {
+        io_threads = static_cast<std::size_t>(std::max(1, std::atoi(env)));
+    }
+    std::size_t rpc_threads = 64;
+    if (const char* env = std::getenv("RPC_THREADS")) {
+        rpc_threads = static_cast<std::size_t>(std::max(1, std::atoi(env)));
+    }
+    if (const char* env = std::getenv("LOG_LEVEL")) {
+        std::string lvl = env;
+        if (lvl == "debug") shardcache::Logger::instance().set_level(shardcache::LogLevel::DEBUG);
+        if (lvl == "warn") shardcache::Logger::instance().set_level(shardcache::LogLevel::WARNING);
+        if (lvl == "error") shardcache::Logger::instance().set_level(shardcache::LogLevel::ERR);
     }
 
     if (argc > 1) {
@@ -63,25 +79,18 @@ int main(int argc, char* argv[]) {
     cluster.start();
 
     try {
-        boost::asio::io_context io_context;
-        shardcache::network::TCPServer server(io_context, port, cluster);
+        // The acceptor gets its own context; connections are spread across
+        // one io_context per I/O thread.
+        boost::asio::io_context accept_context;
+        shardcache::network::IoContextPool io_pool(io_threads);
+        shardcache::network::TCPServer server(accept_context, port, cluster, &io_pool, rpc_threads);
 
-        shardcache::Logger::instance().info("ShardCache Engine running with 4 workers. Listening on port " + std::to_string(port) + "...");
-        constexpr std::size_t worker_count = 4;
-        std::vector<std::thread> workers;
-        workers.reserve(worker_count);
-
-        for (std::size_t i = 0; i < worker_count; ++i) {
-            workers.emplace_back([&io_context]() {
-                io_context.run();
-            });
-        }
-
-        for (auto& worker : workers) {
-            if (worker.joinable()) {
-                worker.join();
-            }
-        }
+        shardcache::Logger::instance().info("ShardCache Engine running with " + std::to_string(io_threads) +
+                                            " I/O threads and " + std::to_string(rpc_threads) +
+                                            " RPC threads. Listening on port " + std::to_string(port) + "...");
+        io_pool.start();
+        accept_context.run();
+        io_pool.join();
     } catch (const std::exception& e) {
         shardcache::Logger::instance().error("Fatal server error: " + std::string(e.what()));
         return 1;

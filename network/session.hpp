@@ -2,6 +2,7 @@
 #define SHARDCACHE_SESSION_HPP
 
 #include "command_handler.hpp"
+#include "protocol/command.hpp"
 
 #include <boost/asio.hpp>
 #include <array>
@@ -23,6 +24,7 @@ public:
 private:
     void do_read();
     void process_input();
+    void run_remote(protocol::Command cmd);
     void flush();
     void close();
 
@@ -33,6 +35,7 @@ private:
     std::string output_;
     std::string writing_;
     bool closing_{false};
+    bool awaiting_rpc_{false};
 };
 
 } // namespace shardcache::network

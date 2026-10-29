@@ -4,6 +4,7 @@
 #include <string>
 #include <mutex>
 #include <iostream>
+#include <atomic>
 
 namespace shardcache {
 
@@ -19,6 +20,8 @@ public:
     static Logger& instance();
 
     void set_level(LogLevel level);
+    // Lock-free check so hot paths can skip building messages that would be dropped.
+    bool enabled(LogLevel level) const { return level >= min_level_.load(std::memory_order_relaxed); }
     void log(LogLevel level, const std::string& message);
 
     void info(const std::string& message) { log(LogLevel::INFO, message); }
@@ -28,7 +31,7 @@ public:
 
 private:
     Logger() = default;
-    LogLevel min_level_{LogLevel::INFO};
+    std::atomic<LogLevel> min_level_{LogLevel::INFO};
     std::mutex mutex_;
 };
 

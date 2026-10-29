@@ -28,7 +28,7 @@ bool ReplicationManager::replicate_set(
     for (const auto& node : replicas) {
         if (!local_node_id_.empty() && node.id == local_node_id_) continue;
 
-        Logger::instance().debug("Replicating SET for key '" + key + "' to node " + node.id + " (" + node.host + ":" + std::to_string(node.port) + ")");
+        if (Logger::instance().enabled(LogLevel::DEBUG)) Logger::instance().debug("Replicating SET for key '" + key + "' to node " + node.id + " (" + node.host + ":" + std::to_string(node.port) + ")");
         auto client = peer_pool_->acquire(node.host, node.port);
         if (client) {
             std::optional<uint64_t> ttl_ms = std::nullopt;
@@ -58,7 +58,7 @@ bool ReplicationManager::replicate_delete(
     for (const auto& node : replicas) {
         if (!local_node_id_.empty() && node.id == local_node_id_) continue;
 
-        Logger::instance().debug("Replicating DELETE for key '" + key + "' to node " + node.id);
+        if (Logger::instance().enabled(LogLevel::DEBUG)) Logger::instance().debug("Replicating DELETE for key '" + key + "' to node " + node.id);
         auto client = peer_pool_->acquire(node.host, node.port);
         if (client) {
             auto res = (*client)->replica_delete(key);
@@ -83,7 +83,7 @@ bool ReplicationManager::replicate_expire(
     for (const auto& node : replicas) {
         if (!local_node_id_.empty() && node.id == local_node_id_) continue;
 
-        Logger::instance().debug("Replicating EXPIRE for key '" + key + "' to node " + node.id);
+        if (Logger::instance().enabled(LogLevel::DEBUG)) Logger::instance().debug("Replicating EXPIRE for key '" + key + "' to node " + node.id);
         auto client = peer_pool_->acquire(node.host, node.port);
         if (client) {
             auto res = (*client)->replica_expire(key, static_cast<uint64_t>(ttl.count()));

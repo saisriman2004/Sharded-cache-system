@@ -154,7 +154,7 @@ bool Cluster::set(
         return true;
     }
 
-    Logger::instance().debug("Forwarding SET key '" + key + "' to primary node " + primary->id + " (" + primary->host + ":" + std::to_string(primary->port) + ")");
+    if (Logger::instance().enabled(LogLevel::DEBUG)) Logger::instance().debug("Forwarding SET key '" + key + "' to primary node " + primary->id + " (" + primary->host + ":" + std::to_string(primary->port) + ")");
     auto client = peer_pool_->acquire(primary->host, primary->port);
     if (client) {
         std::optional<uint64_t> ttl_ms = std::nullopt;
@@ -180,7 +180,7 @@ std::optional<std::string> Cluster::get(const std::string& key) {
         return local_cache_.get(key);
     }
 
-    Logger::instance().debug("Forwarding GET key '" + key + "' to target node " + target->id + " (" + target->host + ":" + std::to_string(target->port) + ")");
+    if (Logger::instance().enabled(LogLevel::DEBUG)) Logger::instance().debug("Forwarding GET key '" + key + "' to target node " + target->id + " (" + target->host + ":" + std::to_string(target->port) + ")");
     auto client = peer_pool_->acquire(target->host, target->port);
     if (client) {
         auto res = (*client)->get(key);

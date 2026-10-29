@@ -29,6 +29,37 @@ std::string stats_body(Cluster& cluster) {
 
 } // namespace
 
+CommandHandler::CommandHandler(Cluster& cluster, std::size_t rpc_threads)
+    : cluster_(cluster), rpc_pool_(rpc_threads) {}
+
+CommandHandler::~CommandHandler() {
+    rpc_pool_.join();
+}
+
+bool CommandHandler::runs_locally(const protocol::Command& cmd) const {
+    switch (cmd.type) {
+        case CommandType::Set:
+        case CommandType::Delete:
+        case CommandType::Exists:
+        case CommandType::Expire:
+        case CommandType::Get:
+        case CommandType::Ttl:
+        case CommandType::Pttl:
+            break;
+        default:
+            return true;
+    }
+    if (cluster_.node_count() <= 1) return true;
+
+    // Reads of keys this node owns are served from the local cache.
+    bool read_only = cmd.type == CommandType::Get || cmd.type == CommandType::Ttl ||
+                     cmd.type == CommandType::Pttl ||
+                     (cmd.type == CommandType::Exists && cmd.keys.size() == 1);
+    if (!read_only) return false;
+    auto owner = cluster_.locate(cmd.key);
+    return owner.has_value() && owner->id == cluster_.local_node().id;
+}
+
 void CommandHandler::execute(const protocol::Command& cmd, std::string& out) {
     switch (cmd.type) {
         case CommandType::Ping:
